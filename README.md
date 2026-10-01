@@ -6,7 +6,7 @@
 
 You already pay for an AI tool. Realizah tells you what you pay for each answer that actually works.
 Type "I use X for Y", pick up to two alternatives, and hit run. Realizah makes real model calls on a
-short fixture, checks each answer, and shows dollars per successful outcome with a Recommended badge.
+short fixture, checks each answer, and labels the results with two cost labels: Cheaper cost and Better cost.
 No login for the first result.
 
 Original work for Galuxium Nexus V2. All IP retained by the author.
@@ -36,8 +36,11 @@ outcome on their own task before renewing.
 5. Estimated cost = `(tokens_in * input_rate + tokens_out * output_rate) / 1,000,000` from `tools_seed`.
 6. `cost_per_success_usd` = estimated cost if the answer passed, otherwise null. Failed answers are never
    "cheap".
-7. The passing option with the lowest cost per success gets the Recommended badge. If nothing passes, there is
-   no recommendation and the page says so.
+7. Two labels, assigned independently. A model can carry one, both, or neither, and ties share a label:
+   - **Cheaper cost**: lowest estimated dollars for this run (sticker cost), pass or fail.
+   - **Better cost**: lowest dollars per successful outcome. A fail never gets it. If nothing passes, nobody does.
+   Realizah does not rank which answer reads best. Each card shows the reply, pass/fail, sticker cost and
+   $/success so you can judge the answers yourself.
 8. If a model id returns 404 on the key, the run falls back to `gpt-4o-mini` at temperature 0.9 and labels the
    card clearly as a fallback.
 
@@ -89,7 +92,7 @@ null with `is_unknown = true` and shown as UNKNOWN.
 - **Spend control**: 3 runs per day per hashed IP (atomic upsert, so concurrent requests cannot overshoot),
   400 output token cap, 25s timeout per model, at most 3 calls per run.
 - **Auditability**: one transaction writes `runs`, `run_results` and `audit_events` together.
-- **Honest scoring**: failed answers have no cost per success; unknown prices cannot win a recommendation.
+- **Honest scoring**: failed answers have no cost per success; unknown prices cannot earn either cost label.
 
 ## Schema
 
@@ -98,7 +101,7 @@ See [`db/schema.sql`](db/schema.sql) and [`db/seed.sql`](db/seed.sql).
 | Table | Purpose |
 | --- | --- |
 | `tools_seed` | Model slug, provider, model id, per-1M token prices, pricing URL, `last_checked`, `is_unknown` |
-| `runs` | One comparison: current tool text, task, success criteria, recommended slug, hashed IP |
+| `runs` | One comparison: current tool text, task, success criteria, `recommended_slug` (the Better cost slug), hashed IP |
 | `run_results` | One row per model: passed, quality band, estimated cost, cost per success, latency, error |
 | `audit_events` | One row per completed model call: model, tokens in/out, estimated cost, success |
 | `rate_limits` | Hashed IP, window start, count |

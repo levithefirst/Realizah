@@ -19,11 +19,6 @@ function asOf(iso: string | null): string {
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-function monthly(v: number | null): string {
-  if (v === null) return "UNKNOWN";
-  return "$" + (v * 1000).toFixed(2);
-}
-
 export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaultTask: string }) {
   const [statement, setStatement] = useState("");
   const initial = (tools.find((t) => t.slug === "gpt-4o-mini") ?? tools[0])?.slug ?? "";
@@ -87,9 +82,6 @@ export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaul
       setLoading(false);
     }
   }
-
-  const rec = result?.results.find((r) => r.recommended) ?? null;
-  const cur = result?.results.find((r) => r.isCurrent) ?? null;
 
   return (
     <>
@@ -174,15 +166,13 @@ export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaul
 
       {result ? (
         <section aria-live="polite">
-          <div className={`verdict ${rec ? "" : "none"}`}>
-            <strong>{rec ? `Recommended: ${rec.label}` : "No recommendation"}</strong>
-            {result.recommendation}
-            {rec && cur && rec.slug !== cur.slug ? (
-              <div className="hint">
-                At 1,000 of these tasks a month: {monthly(rec.costPerSuccessUsd)} with {rec.label} vs{" "}
-                {cur.costPerSuccessUsd !== null ? monthly(cur.costPerSuccessUsd) : "no successful outcomes"} with your current model.
-              </div>
-            ) : null}
+          <div className={`verdict ${result.betterCostSlugs.length ? "" : "none"}`}>
+            <strong>Cost labels for this run</strong>
+            {result.summary}
+            <div className="hint">
+              Cheaper cost is the lowest sticker cost, pass or fail. Better cost is the lowest dollars per successful
+              outcome, and a fail never gets it. Neither label judges which answer reads best.
+            </div>
           </div>
 
           <div className="cards">
@@ -223,9 +213,10 @@ export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaul
 
 function Card({ r }: { r: ResultCard }) {
   return (
-    <article className={`card ${r.recommended ? "is-rec" : ""}`}>
+    <article className="card">
       <div className="chips">
-        {r.recommended ? <span className="chip rec">Recommended</span> : null}
+        {r.cheaperCost ? <span className="chip rec">Cheaper cost</span> : null}
+        {r.betterCost ? <span className="chip rec">Better cost</span> : null}
         {r.isCurrent ? <span className="chip cur">Current</span> : null}
         {r.qualityBand === "good" ? <span className="chip ok">PASS</span> : <span className="chip bad">{r.qualityBand === "error" ? "ERROR" : "FAIL"}</span>}
       </div>
@@ -234,20 +225,18 @@ function Card({ r }: { r: ResultCard }) {
         <div className="model">{r.modelId}</div>
       </div>
       <dl className="stats">
-        <div className="big"><dt>$ per successful outcome</dt><dd>{r.passed ? formatUsd(r.costPerSuccessUsd) : "n/a (failed)"}</dd></div>
-        <div><dt>Est. cost</dt><dd>{formatUsd(r.estimatedCostUsd)}</dd></div>
+        <div><dt>Sticker cost</dt><dd>{formatUsd(r.estimatedCostUsd)}</dd></div>
+        <div><dt>$ per success</dt><dd>{r.passed ? formatUsd(r.costPerSuccessUsd) : "none (failed)"}</dd></div>
         <div><dt>Latency</dt><dd>{r.latencyMs !== null ? `${(r.latencyMs / 1000).toFixed(1)}s` : "-"}</dd></div>
         <div><dt>Tokens in/out</dt><dd>{r.tokensIn ?? "-"} / {r.tokensOut ?? "-"}</dd></div>
         <div><dt>Words</dt><dd>{r.wordCount ?? "-"}</dd></div>
       </dl>
       <p className="why">{r.why}</p>
       {r.priceAsOf ? <p className="hint" style={{ margin: 0 }}>Price as of {asOf(r.priceAsOf)}</p> : null}
-      {r.output ? (
-        <details>
-          <summary>Show answer</summary>
-          <pre>{r.output}</pre>
-        </details>
-      ) : null}
+      <details open>
+        <summary>Reply</summary>
+        <pre>{r.output ?? "No reply."}</pre>
+      </details>
     </article>
   );
 }

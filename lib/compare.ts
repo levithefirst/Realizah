@@ -3,6 +3,7 @@ import { db } from "./db";
 import { FIXTURE } from "./fixture";
 import { runChecks, type Criteria } from "./checks";
 import { estimateCostUsd } from "./cost";
+import { assignLabels } from "./labels";
 import { chat, ModelNotFoundError } from "./openai";
 import type { Tool } from "./tools";
 
@@ -29,7 +30,10 @@ export type ResultCard = {
   error: string | null;
   why: string;
   output: string | null;
-  recommended: boolean;
+  // Cheaper cost: lowest estimated dollars for this run, pass or fail.
+  cheaperCost: boolean;
+  // Better cost: lowest dollars per successful outcome. A fail never gets it.
+  betterCost: boolean;
 };
 
 export type AuditEvent = {
@@ -48,8 +52,9 @@ export type CompareResult = {
   task: string;
   criteria: Criteria;
   results: ResultCard[];
-  recommendedSlug: string | null;
-  recommendation: string;
+  cheaperCostSlugs: string[];
+  betterCostSlugs: string[];
+  summary: string;
   audit: AuditEvent[];
 };
 
@@ -71,7 +76,8 @@ async function runOne(
 ): Promise<{ card: ResultCard; audit: AuditEvent | null; auditModel: string }> {
   const base = {
     isCurrent,
-    recommended: false,
+    cheaperCost: false,
+    betterCost: false,
     priceAsOf: tool.lastChecked,
   };
   const system = systemPrompt(task, c);
@@ -175,35 +181,6 @@ async function runOne(
   };
 }
 
-function pickRecommendation(cards: ResultCard[]): { slug: string | null; text: string } {
-  const passing = cards.filter((r) => r.passed);
-  if (passing.length === 0) {
-    return { slug: null, text: "No option passed the checks, so there is no recommendation for this task." };
-  }
-  const priced = passing.filter((r) => r.costPerSuccessUsd !== null);
-  if (priced.length === 0) {
-    return {
-      slug: null,
-      text: "Options passed, but none has a published price, so cost per success is UNKNOWN. No recommendation.",
-    };
-  }
-  priced.sort((a, b) => (a.costPerSuccessUsd! - b.costPerSuccessUsd!) || ((a.latencyMs ?? 0) - (b.latencyMs ?? 0)));
-  const best = priced[0];
-  const current = cards.find((r) => r.isCurrent);
-  let text = `${best.label} passed at the lowest cost per successful outcome.`;
-  if (current && current.slug !== best.slug) {
-    if (current.costPerSuccessUsd !== null && current.costPerSuccessUsd > 0) {
-      const saving = 1 - best.costPerSuccessUsd! / current.costPerSuccessUsd;
-      text += ` About ${Math.round(saving * 100)}% cheaper per success than your current tool.`;
-    } else if (current.passed === false) {
-      text += " Your current tool failed this check, so its cost buys no successful outcome.";
-    }
-  } else if (current && current.slug === best.slug) {
-    text += " Your current tool is already the best value here.";
-  }
-  return { slug: best.slug, text };
-}
-
 export async function compare(opts: {
   currentTool: string;
   task: string;
@@ -221,8 +198,7 @@ export async function compare(opts: {
     selected.map((s) => runOne(s.tool, opts.fallback, opts.task, opts.criteria, s.isCurrent))
   );
   const cards = outcomes.map((o) => o.card);
-  const rec = pickRecommendation(cards);
-  for (const c of cards) c.recommended = c.slug === rec.slug;
+  const labels = assignLabels(cards);
 
   const client = await db().connect();
   let runId: string;
@@ -230,10 +206,11 @@ export async function compare(opts: {
   const audit: AuditEvent[] = [];
   try {
     await client.query("begin");
+    // recommended_slug holds the Better cost slug (lowest $ per success), or null.
     const run = await client.query<{ id: string; created_at: Date }>(
       `insert into runs (current_tool, task_text, success_criteria, recommended_slug, ip_hash)
        values ($1, $2, $3, $4, $5) returning id, created_at`,
-      [opts.currentTool, opts.task, JSON.stringify(opts.criteria), rec.slug, opts.ipHash]
+      [opts.currentTool, opts.task, JSON.stringify(opts.criteria), labels.better[0] ?? null, opts.ipHash]
     );
     runId = run.rows[0].id;
     createdAt = run.rows[0].created_at.toISOString();
@@ -278,8 +255,9 @@ export async function compare(opts: {
     task: opts.task,
     criteria: opts.criteria,
     results: cards,
-    recommendedSlug: rec.slug,
-    recommendation: rec.text,
+    cheaperCostSlugs: labels.cheaper,
+    betterCostSlugs: labels.better,
+    summary: labels.summary,
     audit,
   };
 }
