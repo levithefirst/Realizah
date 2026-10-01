@@ -8,6 +8,13 @@ function withSsl(url: string): string {
 declare global {
   // eslint-disable-next-line no-var
   var __realizahPool: Pool | undefined;
+  // eslint-disable-next-line no-var
+  var __realizahTestDb: Pool | undefined;
+}
+
+// Tests swap in an in-process Postgres (PGlite) through this hook.
+export function setTestDb(pool: unknown): void {
+  global.__realizahTestDb = pool as Pool | undefined;
 }
 
 export function hasDatabase(): boolean {
@@ -15,6 +22,7 @@ export function hasDatabase(): boolean {
 }
 
 export function db(): Pool {
+  if (global.__realizahTestDb) return global.__realizahTestDb;
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is not set");
   if (!global.__realizahPool) {
