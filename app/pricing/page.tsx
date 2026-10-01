@@ -1,6 +1,7 @@
 import { hasDatabase, db } from "@/lib/db";
-import { formatUsd } from "@/lib/cost";
+import { formatUsd } from "@/lib/pricing";
 import { freeLimit } from "@/lib/ratelimit";
+import { executionLimits } from "@/lib/config";
 
 export const metadata = { title: "Pricing · Realizah" };
 export const dynamic = "force-dynamic";
@@ -9,10 +10,8 @@ async function observedCostPerRun(): Promise<{ avg: number | null; runs: number 
   if (!hasDatabase()) return { avg: null, runs: 0 };
   try {
     const { rows } = await db().query<{ avg: string | null; runs: string }>(
-      `select avg(total) as avg, count(*) as runs from (
-         select run_id, sum(estimated_cost_usd) as total
-           from audit_events where run_id is not null
-          group by run_id) t`
+      `select avg(actual_execution_cost_usd) as avg, count(*) as runs
+         from comparison_runs where actual_execution_cost_usd is not null`
     );
     return { avg: rows[0].avg === null ? null : Number(rows[0].avg), runs: Number(rows[0].runs) };
   } catch {
@@ -23,10 +22,11 @@ async function observedCostPerRun(): Promise<{ avg: number | null; runs: number 
 export default async function Pricing() {
   const limit = freeLimit();
   const { avg, runs } = await observedCostPerRun();
-  const perRun = avg ?? 0.0006; // conservative planning number until real runs exist
-  const freeWorstCase = perRun * limit * 30;
-  const proRuns = 30 * 30;
-  const proCost = perRun * proRuns;
+  const cap = executionLimits().maxExecutionCostUsd; // hard ceiling per comparison
+  const PRO_RUNS_PER_MONTH = 60;
+  const freeWorstCase = cap * limit * 30;
+  const proWorstCase = cap * PRO_RUNS_PER_MONTH;
+  const proTypical = avg !== null ? avg * PRO_RUNS_PER_MONTH : null;
 
   return (
     <main>
@@ -50,7 +50,7 @@ export default async function Pricing() {
           <h2>Pro</h2>
           <div className="amount">$19<span style={{ fontSize: 14, fontWeight: 400 }}>/mo</span></div>
           <ul>
-            <li>30 comparisons per day</li>
+            <li>60 comparisons per month</li>
             <li>Run history</li>
             <li>CSV export</li>
           </ul>
@@ -71,19 +71,21 @@ export default async function Pricing() {
       <div className="panel prose" style={{ marginTop: 20, maxWidth: "none" }}>
         <h2 style={{ marginTop: 0 }}>How the money works</h2>
         <p>
-          Every comparison sends your task (up to 600 characters) to each available model (3 today) with a 400 token output cap.
+          A comparison runs your task on up to {executionLimits().maxCandidates} relevant models. Realizah estimates the worst-case
+          cost before calling anything and never lets one comparison exceed {formatUsd(cap)} of model spend.
           {avg !== null
-            ? ` Measured average model spend per comparison so far: ${formatUsd(avg)} across ${runs} runs.`
-            : ` Planning figure until real runs exist: ${formatUsd(perRun)} per comparison.`}
+            ? ` Measured average spend so far: ${formatUsd(avg)} per comparison across ${runs} runs.`
+            : " No measured average yet; figures below use the hard ceiling."}
         </p>
         <ul>
           <li>
-            Free tier worst case: {limit} runs/day x 30 days = {formatUsd(freeWorstCase)} per heavy free user per month.
-            The hashed-IP cap keeps this bounded.
+            Free tier ceiling: {limit} runs/day x 30 days x {formatUsd(cap)} = {formatUsd(freeWorstCase)} per heavy free user per month,
+            bounded by the hashed-IP limit.
           </li>
           <li>
-            Pro at $19/mo: even at the 30/day cap every day ({proRuns} runs), model spend is about {formatUsd(proCost)}.
-            Gross margin stays above 95% after card fees.
+            Pro at $19/mo, {PRO_RUNS_PER_MONTH} comparisons: at most {formatUsd(proWorstCase)} of model spend
+            {proTypical !== null ? `, about ${formatUsd(proTypical)} at the measured average` : ""}.
+            {proWorstCase < 19 ? " Spend stays under the price even at the ceiling." : " At the ceiling this would not cover model spend, so the cap or price must change before launch."}
           </li>
           <li>Team API: model cost is passed through at the published rate, so usage never runs at a loss.</li>
           <li>Hosting is serverless (Vercel) plus Neon Postgres, both scale to zero when idle.</li>

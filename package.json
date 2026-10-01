@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -p ${PORT:-3000}",
     "db:setup": "node scripts/db-setup.mjs",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --conditions=react-server --test tests/*.test.ts"
   },
   "engines": {
     "node": ">=20"
@@ -18,13 +18,14 @@
     "pg": "^8.23.1",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "server-only": "^0.0.1"
+    "server-only": "^0.0.1",
+    "typescript": "^5.9.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@types/node": "^22.20.4",
     "@types/pg": "^8.23.1",
     "@types/react": "^19.3.0",
-    "tsx": "^4.23.15",
-    "typescript": "^5.9.3"
+    "tsx": "^4.23.15"
   }
 }
