@@ -1,55 +1,27 @@
-import { formatUsd } from "./cost";
+// The only two labels.
+// Cheaper cost: lowest estimated dollars for this run (pass or fail).
+// Better cost:  lowest dollars per successful outcome. A fail never gets it;
+//               if nothing passes, it does not exist.
+// Ties share a label. Nothing here ranks answer quality.
 
 export type Labelable = {
-  slug: string;
+  key: string;
   label: string;
-  passed: boolean | null;
+  passed: boolean;
   estimatedCostUsd: number | null;
   costPerSuccessUsd: number | null;
-  cheaperCost: boolean;
-  betterCost: boolean;
 };
 
-function lowest(cards: Labelable[], value: (r: Labelable) => number | null): Labelable[] {
-  const priced = cards.filter((r) => value(r) !== null);
-  if (priced.length === 0) return [];
-  const min = Math.min(...priced.map((r) => value(r)!));
-  return priced.filter((r) => value(r) === min);
+function lowest<T extends Labelable>(xs: T[], value: (x: T) => number | null): T[] {
+  const priced = xs.filter((x) => value(x) !== null);
+  if (!priced.length) return [];
+  const min = Math.min(...priced.map((x) => value(x)!));
+  return priced.filter((x) => value(x) === min);
 }
 
-function names(cards: Labelable[]): string {
-  return cards.map((r) => r.label).join(" and ");
-}
-
-// Two independent labels. A model can carry one, both, or neither.
-// Ties share the label. Nothing here ranks answer quality.
-export function assignLabels(cards: Labelable[]): { cheaper: string[]; better: string[]; summary: string } {
-  const cheaper = lowest(cards, (r) => r.estimatedCostUsd);
-  const better = lowest(
-    cards.filter((r) => r.passed),
-    (r) => r.costPerSuccessUsd
-  );
-  for (const c of cards) {
-    c.cheaperCost = cheaper.includes(c);
-    c.betterCost = better.includes(c);
-  }
-
-  const parts: string[] = [];
-  parts.push(
-    cheaper.length
-      ? `Cheaper cost: ${names(cheaper)} at ${formatUsd(cheaper[0].estimatedCostUsd)} for this run.`
-      : "Cheaper cost: none, no call finished with a known price."
-  );
-  if (better.length) {
-    parts.push(`Better cost: ${names(better)} at ${formatUsd(better[0].costPerSuccessUsd)} per successful outcome.`);
-  } else if (cards.some((r) => r.passed)) {
-    parts.push("Better cost: none, the passing models have UNKNOWN prices.");
-  } else {
-    parts.push("Better cost: none, no model passed.");
-  }
+export function assignLabels<T extends Labelable>(xs: T[]): { cheaper: string[]; better: string[] } {
   return {
-    cheaper: cheaper.map((r) => r.slug),
-    better: better.map((r) => r.slug),
-    summary: parts.join(" "),
+    cheaper: lowest(xs, (x) => x.estimatedCostUsd).map((x) => x.key),
+    better: lowest(xs.filter((x) => x.passed), (x) => x.costPerSuccessUsd).map((x) => x.key),
   };
 }
