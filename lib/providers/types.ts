@@ -34,7 +34,8 @@ export interface ProviderAdapter {
 }
 
 // Provider messages that mean "this id exists but not on chat completions".
-const UNSUPPORTED_ENDPOINT = /not a chat model|not supported in the v1\/chat\/completions|only supported in v1\/responses|use the (?:v1\/)?(?:responses|completions) (?:api|endpoint)|does not support chat/i;
+// Also covers retired ids: the provider still lists them but won't serve them.
+const UNSUPPORTED_ENDPOINT = /not a chat model|not supported in the v1\/chat\/completions|only supported in v1\/responses|use the (?:v1\/)?(?:responses|completions) (?:api|endpoint)|does not support chat|has been deprecated|has been retired|is no longer (?:available|supported)/i;
 
 export function errorKindFromResponse(status: number, message: string): RunModelResult["errorKind"] {
   if (UNSUPPORTED_ENDPOINT.test(message)) return "unsupported_endpoint";

@@ -73,3 +73,8 @@ test("'not a chat model' errors are classified as an unsupported endpoint", asyn
   const r = await openAIAdapter({ apiKey: "k", fetchImpl: mockFetch(404, { error: { message: "This is not a chat model and thus not supported in the v1/chat/completions endpoint." } }) }).run({ externalModelId: "gpt-3.5-turbo-instruct", messages: [], maxTokens: 1, timeoutMs: 1000 });
   assert.equal(r.errorKind, "unsupported_endpoint");
 });
+
+test("retired models are classified as unusable on this endpoint", async () => {
+  const r = await openAIAdapter({ apiKey: "k", fetchImpl: mockFetch(404, { error: { message: "The model `gpt-5.1-codex-mini` has been deprecated, learn more here: https://platform.openai.com/docs/deprecations" } }) }).run({ externalModelId: "gpt-5.1-codex-mini", messages: [], maxTokens: 1, timeoutMs: 1000 });
+  assert.equal(r.errorKind, "unsupported_endpoint");
+});
