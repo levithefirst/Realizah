@@ -2,33 +2,36 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { familyKey, selectCandidates } from "../lib/selection/select";
 import { understandTask } from "../lib/task/understand";
-import { access, bigRegistry, LIMITS, model } from "./fixtures";
+import { access, bigRegistry, DEFAULT_LIMITS, LIMITS, model } from "./fixtures";
 
 const writing = understandTask({ task: "Write a 1,000-word article about remote work.", useCase: "long-form writing" });
 const coding = understandTask({ task: "Write a Python function that parses ISO dates, with unit tests.", useCase: "coding" });
 const OR = new Set(["openrouter"]);
 
-test("selects 20 relevant, diverse candidates from a 300-model registry", () => {
+test("queue: diverse core first, then expansion, all filtered before any call", () => {
   const r = selectCandidates({ registry: bigRegistry(), understanding: writing, providers: OR, limits: LIMITS });
-  assert.equal(r.candidates.length, 20);
-  const creators = new Set(r.candidates.map((c) => c.model.creator));
-  assert.ok(creators.size >= 8, `only ${creators.size} creators`);
-  const perCreator = Math.max(...[...creators].map((c) => r.candidates.filter((x) => x.model.creator === c).length));
-  assert.ok(perCreator <= 3, `one creator has ${perCreator}`);
-  assert.ok(r.candidates.every((c) => c.model.outputModalities.includes("text")));
-  assert.equal(new Set(r.candidates.map((c) => familyKey(c.model.slug))).size, 20, "no near-duplicates");
-  assert.ok(r.estimatedExecutionCostUsd <= LIMITS.maxExecutionCostUsd);
-  assert.deepEqual(r.candidates.map((c) => c.rank), Array.from({ length: 20 }, (_, i) => i + 1));
+  assert.equal(r.candidates.length, LIMITS.maxCandidates * 2); // room to skip and continue under the cap
+  const core = r.candidates.filter((c) => c.role === "core");
+  assert.equal(core.length, LIMITS.minCandidates);
+  assert.equal(new Set(core.map((c) => c.model.creator)).size, core.length, "core uses distinct creators");
+  assert.deepEqual(new Set(core.map((c) => c.priceTier)), new Set(["low", "mid", "high"]), "core spans every price tier");
+  assert.ok(r.candidates.every((c) => c.model.outputModalities.join() === "text"));
+  assert.equal(new Set(r.candidates.map((c) => familyKey(c.model.slug))).size, r.candidates.length, "no near-duplicates");
+  assert.deepEqual(r.candidates.map((c) => c.rank), r.candidates.map((_, i) => i + 1));
+  const first20Creators = new Set(r.candidates.slice(0, 20).map((c) => c.model.creator));
+  assert.ok(first20Creators.size >= 8, `only ${first20Creators.size} creators`);
 });
 
-test("not the 20 highest benchmarks: cheap models keep a share of the slots", () => {
+test("core is not biased toward cheap models: the high tier is always in it", () => {
   const r = selectCandidates({ registry: bigRegistry(), understanding: writing, providers: OR, limits: LIMITS });
-  const prices = r.candidates.map((c) => c.access.inputUsdPer1m!);
-  assert.ok(Math.min(...prices) <= 0.06, "cheapest tier represented");
-  assert.ok(Math.max(...prices) > 2, "pricier tier represented");
+  const core = r.candidates.filter((c) => c.role === "core");
+  const maxWorst = Math.max(...r.candidates.map((c) => c.worstCaseCostUsd));
+  const highCore = core.find((c) => c.priceTier === "high")!;
+  assert.ok(highCore.worstCaseCostUsd > maxWorst * 0.5, "core includes a genuinely high-priced model");
+  assert.equal(core[0].worstCaseCostUsd, Math.min(...core.map((c) => c.worstCaseCostUsd)), "cheapest core model runs first (paid screening)");
 });
 
-test("fewer than 20 relevant models: returns only those", () => {
+test("fewer relevant models than the limit: returns only those", () => {
   const reg = Array.from({ length: 7 }, (_, i) => model(`c${i}/m${i}`));
   reg.push(model("x/image", { outputModalities: ["image"] }));
   const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS });
@@ -36,7 +39,7 @@ test("fewer than 20 relevant models: returns only those", () => {
   assert.equal(r.excluded.wrong_modality, 1);
 });
 
-test("capability filters: modality, context window, output limit", () => {
+test("capability filters: modality, context window, output capacity", () => {
   const reg = [
     model("a/ok"),
     model("b/image", { outputModalities: ["image"] }),
@@ -53,18 +56,14 @@ test("capability filters: modality, context window, output limit", () => {
 
 test("image tasks only consider models that output images", () => {
   const imageTask = understandTask({ task: "Design a logo for a bakery", useCase: "logos" });
-  const reg = [model("a/text"), model("b/img", { outputModalities: ["image", "text"] })];
+  const reg = [model("a/text"), model("b/img", { outputModalities: ["image", "text"] }), model("c/img2", { outputModalities: ["image"] })];
   const r = selectCandidates({ registry: reg, understanding: imageTask, providers: OR, limits: LIMITS });
-  assert.deepEqual(r.candidates.map((c) => c.model.slug), ["b/img"]);
+  assert.deepEqual(r.candidates.map((c) => c.model.slug).sort(), ["b/img", "c/img2"]);
 });
 
 test("provider selection: only configured providers, cheapest path, direct wins ties", () => {
-  const both = model("openai/m", {
-    access: [access("openrouter", "openai/m", 0.4, 1.6), access("openai", "m", 0.4, 1.6)],
-  });
-  const cheaperViaOR = model("openai/n", {
-    access: [access("openrouter", "openai/n", 0.1, 0.4), access("openai", "n", 0.4, 1.6)],
-  });
+  const both = model("openai/m", { access: [access("openrouter", "openai/m", 0.4, 1.6), access("openai", "m", 0.4, 1.6)] });
+  const cheaperViaOR = model("openai/n", { access: [access("openrouter", "openai/n", 0.1, 0.4), access("openai", "n", 0.4, 1.6)] });
   const onlyOR = model("anthropic/x");
   const r1 = selectCandidates({ registry: [both, cheaperViaOR, onlyOR], understanding: writing, providers: new Set(["openrouter", "openai"]), limits: LIMITS });
   const via = Object.fromEntries(r1.candidates.map((c) => [c.model.slug, c.access.providerId]));
@@ -75,67 +74,81 @@ test("provider selection: only configured providers, cheapest path, direct wins 
   assert.equal(r2.excluded.no_configured_provider, 1);
 });
 
-test("unknown prices, free variants, stale models and unconfigured providers are excluded", () => {
+test("registry-first exclusions: unknown prices, incompatible access, unconfigured, stale", () => {
   const reg = [
     model("a/priced"),
     model("b/unpriced", { access: [access("openrouter", "b/unpriced", null, null)] }),
-    model("c/free", { access: [access("openrouter", "c/free:free", 0, 0)] }),
+    model("c/instruct", { access: [{ ...access("openrouter", "c/instruct", 0.1, 0.1), chatSupported: false }] }),
     model("d/stale", { status: "stale" }),
     model("e/elsewhere", { access: [access("together", "e", 0.1, 0.1)] }),
     model("f/priced"),
+    model("g/audio", { outputModalities: ["text", "audio"] }),
   ];
   const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS });
   assert.deepEqual(r.candidates.map((c) => c.model.slug).sort(), ["a/priced", "f/priced"]);
-  assert.equal(r.excluded.price_unknown, 1);
-  assert.equal(r.excluded.no_configured_provider, 2); // free-only and unconfigured provider
+  assert.deepEqual(r.excluded, { price_unknown: 1, incompatible_access: 1, no_configured_provider: 1, wrong_modality: 1 });
+  assert.equal(r.considered, 6); // stale models aren't considered at all
+});
+
+test("obviously excessive models are dropped before any call", () => {
+  const reg = [model("a/cheap", { price: [0.1, 0.4] }), model("b/frontier", { price: [15, 75] }), model("c/cheap", { price: [0.2, 0.8] })];
+  const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: DEFAULT_LIMITS, taskText: "Write a 1,000-word article about remote work." });
+  assert.deepEqual(r.candidates.map((c) => c.model.slug).sort(), ["a/cheap", "c/cheap"]);
+  assert.equal(r.excluded.excessive_cost, 1);
+  assert.ok(r.candidates.every((c) => c.worstCaseCostUsd <= DEFAULT_LIMITS.maxCostPerCandidateUsd));
 });
 
 test("user budget filter lists models whose single task would exceed it", () => {
-  const reg = [model("a/cheap", { price: [0.1, 0.4] }), model("b/pricey", { price: [150, 600] }), model("c/cheap", { price: [0.2, 0.8] })];
-  const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS, userBudgetUsd: 0.05 });
+  const reg = [model("a/cheap", { price: [0.1, 0.4] }), model("b/pricey", { price: [5, 20] }), model("c/cheap", { price: [0.2, 0.8] })];
+  const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS, userBudgetUsd: 0.005 });
   assert.deepEqual(r.candidates.map((c) => c.model.slug).sort(), ["a/cheap", "c/cheap"]);
   assert.equal(r.overUserBudget[0].slug, "b/pricey");
-  assert.ok(r.overUserBudget[0].worstCaseCostUsd > 0.05);
+  assert.ok(r.overUserBudget[0].worstCaseCostUsd > 0.005);
 });
 
-test("Realizah's execution budget caps total worst-case spend", () => {
-  const tight = { ...LIMITS, maxExecutionCostUsd: 0.01 };
-  const r = selectCandidates({ registry: bigRegistry(), understanding: writing, providers: OR, limits: tight });
-  assert.ok(r.candidates.length > 0 && r.candidates.length < 20);
-  assert.ok(r.estimatedExecutionCostUsd <= 0.01 + 1e-12);
-  assert.ok((r.excluded.exceeds_execution_budget ?? 0) > 0);
+test("zero execution budget: no paid candidate survives preflight", () => {
+  const r = selectCandidates({ registry: bigRegistry(), understanding: writing, providers: OR, limits: { ...DEFAULT_LIMITS, maxExecutionCostUsd: 0, maxCostPerCandidateUsd: 0 } });
+  assert.equal(r.candidates.length, 0);
+  assert.equal(r.screening.length, 0, "no screening without a paid comparison to inform");
+  assert.ok((r.excluded.excessive_cost ?? 0) > 0);
 });
 
-test("MAX_CANDIDATES_PER_RUN bounds the number of calls", () => {
-  const r = selectCandidates({ registry: bigRegistry(), understanding: writing, providers: OR, limits: { ...LIMITS, maxCandidates: 5 } });
-  assert.equal(r.candidates.length, 5);
+test("free tiers become screening runs, never part of the paid queue", () => {
+  const reg = [
+    model("a/one", { access: [access("openrouter", "a/one", 0.1, 0.4), access("openrouter", "a/one:free", 0, 0)] }),
+    model("b/two"),
+    model("c/free-only", { access: [access("openrouter", "c/free-only:free", 0, 0)] }),
+  ];
+  const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS });
+  assert.ok(r.candidates.every((c) => !c.access.externalModelId.endsWith(":free")));
+  assert.deepEqual(r.candidates.map((c) => c.model.slug).sort(), ["a/one", "b/two"]);
+  assert.equal(r.excluded.free_tier_only, 1);
+  assert.equal(r.screening.length, 2);
+  assert.ok(r.screening.every((c) => c.role === "free_screening" && c.priceTier === "free" && c.worstCaseCostUsd === 0));
+  const off = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: { ...LIMITS, freeScreeningModels: 0 } });
+  assert.equal(off.screening.length, 0);
 });
 
-test("coding tasks rank by the coding benchmark within each creator", () => {
+test("dynamic output ceiling and cost preflight feed every candidate", () => {
+  const short = understandTask({ task: "Write a cold email under 100 words.", useCase: "email" });
+  const r = selectCandidates({ registry: [model("a/x"), model("b/y", { capabilities: ["text_generation", "reasoning"] })], understanding: short, providers: OR, limits: DEFAULT_LIMITS, taskText: "Write a cold email under 100 words." });
+  assert.equal(r.plannedOutputTokens, 204); // 100 x 1.4 + 64
+  const plain = r.candidates.find((c) => c.model.slug === "a/x")!;
+  const reasoning = r.candidates.find((c) => c.model.slug === "b/y")!;
+  assert.equal(plain.maxOutputTokens, 204);
+  assert.equal(reasoning.maxOutputTokens, 408); // + headroom, never more than the answer itself
+  assert.ok(plain.expectedCostUsd < plain.worstCaseCostUsd);
+  assert.ok(r.estimatedExecutionCostUsd <= r.worstCaseCoreUsd);
+});
+
+test("relevance uses the task's benchmark (a signal, not a winner)", () => {
   const reg = [
     model("a/low", { benchmarks: { coding_index: 10, intelligence_index: 60 } }),
-    model("a/high", { benchmarks: { coding_index: 60, intelligence_index: 10 } }),
-    model("a/mid", { benchmarks: { coding_index: 30, intelligence_index: 30 } }),
+    model("b/high", { benchmarks: { coding_index: 60, intelligence_index: 10 } }),
+    model("c/mid", { benchmarks: { coding_index: 30, intelligence_index: 30 } }),
   ];
-  const r = selectCandidates({ registry: reg, understanding: coding, providers: OR, limits: { ...LIMITS, maxCandidates: 1 } });
-  assert.equal(r.candidates[0].model.slug, "a/high");
-});
-
-test("benchmarks are signals only: a model without benchmarks is still eligible", () => {
-  const reg = [model("a/bench", { benchmarks: { intelligence_index: 50 } }), model("b/nobench")];
-  const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS });
-  assert.equal(r.candidates.length, 2);
-});
-
-test("text tasks exclude dedicated media models and ids a provider said can't chat", () => {
-  const reg = [
-    model("a/text"),
-    model("b/audio-and-text", { outputModalities: ["text", "audio"] }),
-    model("c/instruct", { access: [{ ...access("openrouter", "c/instruct", 0.1, 0.1), chatSupported: false }] }),
-    model("d/text"),
-  ];
-  const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS });
-  assert.deepEqual(r.candidates.map((c) => c.model.slug).sort(), ["a/text", "d/text"]);
-  assert.equal(r.excluded.wrong_modality, 1);
-  assert.equal(r.excluded.no_configured_provider, 1);
+  const r = selectCandidates({ registry: reg, understanding: coding, providers: OR, limits: LIMITS });
+  const rel = Object.fromEntries(r.candidates.map((c) => [c.model.slug, c.relevance]));
+  assert.ok(rel["b/high"] > rel["c/mid"] && rel["c/mid"] > rel["a/low"]);
+  assert.equal(r.candidates.length, 3, "low-benchmark models are still eligible");
 });

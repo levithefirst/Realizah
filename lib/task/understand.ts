@@ -14,6 +14,7 @@ import {
   extractRequiredFields,
   extractRequiredSections,
   extractWordCount,
+  extractWantsTests,
   type OutputFormat,
   type WordCount,
 } from "./constraints";
@@ -54,6 +55,7 @@ export type TaskConstraints = {
   requiresTools: boolean;
   requiresWebAccess: boolean;
   requiresInputFile: "image" | "audio" | null;
+  wantsTests: boolean;
   estimatedInputTokens: number;
 };
 
@@ -181,6 +183,7 @@ export function understandTask(input: {
     requiresTools: primary === "agentic",
     requiresWebAccess: WEB_ACCESS.test(input.task) && (primary === "research" || ranked.includes("research")),
     requiresInputFile: primary === "image_understanding" ? "image" : primary === "speech_to_text" ? "audio" : null,
+    wantsTests: primary === "coding" && extractWantsTests(input.task),
     estimatedInputTokens: estimateTokens(input.task),
   };
 

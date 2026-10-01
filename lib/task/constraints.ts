@@ -209,6 +209,10 @@ export function extractRequiredFields(text: string): string[] {
     .slice(0, 20);
 }
 
+export function extractWantsTests(text: string): boolean {
+  return /\b(?:unit tests?|tests? cases?|with tests|and tests|write tests|jest|vitest|pytest|mocha|test suite)\b/i.test(text);
+}
+
 export function estimateTokens(text: string): number {
   // Conservative: ~3.5 characters per token for English; never below 1.
   return Math.max(1, Math.ceil(text.length / 3.5));

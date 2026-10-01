@@ -35,6 +35,52 @@ async function pool<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): 
   return out;
 }
 
+// One candidate: call, cost from its own price snapshot, evaluate.
+export async function runCandidate(opts: {
+  candidate: Candidate;
+  messages: ChatMessage[];
+  adapters: Map<string, ProviderAdapter>;
+  understanding: TaskUnderstanding;
+  timeoutMs: number;
+  wordMaxOverride?: number | null;
+}): Promise<CandidateOutcome> {
+  const c = opts.candidate;
+  const adapter = opts.adapters.get(c.access.providerId);
+  const run: RunModelResult = adapter
+    ? await adapter.run({
+        externalModelId: c.access.externalModelId,
+        messages: opts.messages,
+        maxTokens: c.maxOutputTokens,
+        timeoutMs: opts.timeoutMs,
+      })
+    : {
+        ok: false,
+        text: "",
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        latencyMs: 0,
+        finishReason: null,
+        providerReportedCostUsd: null,
+        error: `provider ${c.access.providerId} is not configured`,
+        errorKind: "auth",
+      };
+  const estimatedCostUsd = run.ok ? taskCostUsd(run.inputTokens, run.outputTokens, c.access) : null;
+  const evaluation = run.ok ? evaluate(run.text, run.finishReason, opts.understanding, { wordMax: opts.wordMaxOverride }) : null;
+  const passed = Boolean(run.ok && evaluation?.passed);
+  return {
+    candidate: c,
+    run,
+    estimatedCostUsd,
+    // A failed result has no cost per success; neither does an unpriced one.
+    costPerSuccessUsd: passed ? estimatedCostUsd : null,
+    evaluation,
+    passed,
+  };
+}
+
+// Runs every given candidate with bounded concurrency and no spend control.
+// Comparisons go through runProgressive (progressive.ts), which enforces the cap.
 export async function executeCandidates(opts: {
   candidates: Candidate[];
   messages: ChatMessage[];
@@ -44,38 +90,5 @@ export async function executeCandidates(opts: {
   maxConcurrent: number;
   wordMaxOverride?: number | null;
 }): Promise<CandidateOutcome[]> {
-  return pool(opts.candidates, opts.maxConcurrent, async (c) => {
-    const adapter = opts.adapters.get(c.access.providerId);
-    const run: RunModelResult = adapter
-      ? await adapter.run({
-          externalModelId: c.access.externalModelId,
-          messages: opts.messages,
-          maxTokens: c.maxOutputTokens,
-          timeoutMs: opts.timeoutMs,
-        })
-      : {
-          ok: false,
-          text: "",
-          inputTokens: null,
-          outputTokens: null,
-          totalTokens: null,
-          latencyMs: 0,
-          finishReason: null,
-          providerReportedCostUsd: null,
-          error: `provider ${c.access.providerId} is not configured`,
-          errorKind: "auth",
-        };
-    const estimatedCostUsd = run.ok ? taskCostUsd(run.inputTokens, run.outputTokens, c.access) : null;
-    const evaluation = run.ok ? evaluate(run.text, run.finishReason, opts.understanding, { wordMax: opts.wordMaxOverride }) : null;
-    const passed = Boolean(run.ok && evaluation?.passed);
-    return {
-      candidate: c,
-      run,
-      estimatedCostUsd,
-      // A failed result has no cost per success; neither does an unpriced one.
-      costPerSuccessUsd: passed ? estimatedCostUsd : null,
-      evaluation,
-      passed,
-    };
-  });
+  return pool(opts.candidates, opts.maxConcurrent, (candidate) => runCandidate({ ...opts, candidate }));
 }

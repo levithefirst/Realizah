@@ -1,13 +1,30 @@
 import type { ExecutionLimits } from "../lib/config";
 import type { RegistryAccess, RegistryModel } from "../lib/registry/types";
 
+// Generous limits for selection tests; progressive tests use their own.
 export const LIMITS: ExecutionLimits = {
   maxCandidates: 20,
+  minCandidates: 4,
   maxExecutionCostUsd: 1,
+  maxCostPerCandidateUsd: 1,
   maxOutputTokens: 4096,
   timeoutMs: 1000,
   maxConcurrent: 4,
-  reasoningHeadroomTokens: 2048,
+  reasoningHeadroomTokens: 1024,
+  freeScreeningModels: 2,
+};
+
+// The production defaults (MAX_CANDIDATES_PER_RUN=10, MAX_EXECUTION_COST_USD=0.03, ...).
+export const DEFAULT_LIMITS: ExecutionLimits = {
+  maxCandidates: 10,
+  minCandidates: 4,
+  maxExecutionCostUsd: 0.03,
+  maxCostPerCandidateUsd: 0.01,
+  maxOutputTokens: 4096,
+  timeoutMs: 1000,
+  maxConcurrent: 5,
+  reasoningHeadroomTokens: 1024,
+  freeScreeningModels: 2,
 };
 
 let seq = 0;

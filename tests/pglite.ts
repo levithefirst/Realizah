@@ -11,16 +11,16 @@ export async function freshDb() {
   for (const f of (await readdir(dir)).filter((x) => x.endsWith(".sql")).sort()) {
     await pg.exec(await readFile(new URL(f, dir), "utf8"));
   }
-  const pool = {
-    async query(text: string, params?: unknown[]) {
-      if (!params?.length && text.includes(";")) {
-        await pg.exec(text);
-        return { rows: [], rowCount: 0 };
-      }
-      const r = await pg.query(text, params as any[]);
-      return { rows: r.rows, rowCount: r.affectedRows ?? r.rows.length };
-    },
+  const query = async (text: string, params?: unknown[]) => {
+    if (!params?.length && text.includes(";")) {
+      await pg.exec(text);
+      return { rows: [], rowCount: 0 };
+    }
+    const r = await pg.query(text, params as any[]);
+    return { rows: r.rows, rowCount: r.affectedRows ?? r.rows.length };
   };
+  // PGlite is a single connection, so a "client" is the same connection.
+  const pool = { query, connect: async () => ({ query, release: () => {} }) };
   setTestDb(pool);
   return pg;
 }

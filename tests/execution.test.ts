@@ -37,7 +37,8 @@ function recordingAdapter(id: string, reply: (req: RunModelRequest) => Partial<R
 }
 
 function select(n = 20) {
-  return selectCandidates({ registry: bigRegistry(), understanding: u, providers: new Set(["openrouter"]), limits: { ...LIMITS, maxCandidates: n } });
+  const sel = selectCandidates({ registry: bigRegistry(), understanding: u, providers: new Set(["openrouter"]), limits: { ...LIMITS, maxCandidates: n, minCandidates: Math.min(4, n) } });
+  return { ...sel, candidates: sel.candidates.slice(0, n) };
 }
 
 test("20 candidates: every one receives the exact same user task, unchanged", async () => {

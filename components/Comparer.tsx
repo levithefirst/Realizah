@@ -185,7 +185,10 @@ export default function Comparer({ products }: { products: AiProduct[] }) {
       {error ? <div className="alert error" role="alert">{error}</div> : null}
       {phase === "running" && plan ? (
         <div className="alert info" aria-live="polite">
-          Comparing {plan.candidateCount} relevant models. Each gets your task exactly as written.
+          Comparing up to {plan.candidateCount} relevant models
+          {plan.screeningCount ? ` plus ${plan.screeningCount} free-tier screening runs` : ""}, within Realizah&apos;s{" "}
+          {formatUsd(plan.executionBudgetUsd)} cap. Each gets your task exactly as written; Realizah stops early once the comparison
+          is meaningful.
         </div>
       ) : null}
 
@@ -200,7 +203,8 @@ function Results({ r }: { r: ComparisonDTO & { remaining?: number } }) {
     <section aria-live="polite">
       <div className={`verdict ${anyBetter ? "" : "none"}`}>
         <strong>Compared across {r.attempted} {r.attempted === 1 ? "model" : "models"}</strong>
-        {r.succeeded} passed, {r.failed} failed or errored. {r.summary}
+        {r.succeeded} passed, {r.failed} failed or errored
+        {r.screeningRuns ? `, plus ${r.screeningRuns} free-tier screening ${r.screeningRuns === 1 ? "run" : "runs"} (no cost labels)` : ""}. {r.summary}
         <div className="hint">
           Cheaper cost is the lowest estimated dollars for this run, pass or fail. Better cost is the lowest dollars per successful
           outcome; a failed result never gets it. Neither label judges which answer reads best.
@@ -221,6 +225,12 @@ function Results({ r }: { r: ComparisonDTO & { remaining?: number } }) {
           Budget ${r.budgetUsd}: run counts below are estimates from one run per model at today&apos;s prices, not a guarantee.
         </p>
       ) : null}
+
+      <p className="hint">
+        {r.stopReason} Realizah spent {formatUsd(r.actualExecutionCostUsd)} of its {formatUsd(r.executionBudgetUsd)} cap
+        (estimated {formatUsd(r.estimatedExecutionCostUsd)} beforehand; worst case reserved at any moment {formatUsd(r.peakCommittedUsd)}).
+        Output ceiling for this task: {r.outputTokenCeiling} tokens ({r.outputBudgetBasis}).
+      </p>
 
       <div className="cards">
         {r.results.map((x) => (
@@ -249,9 +259,33 @@ function Results({ r }: { r: ComparisonDTO & { remaining?: number } }) {
           </tbody>
         </table>
       </div>
+      {r.skipped.length ? (
+        <>
+          <h2 className="section">Not run ({r.skipped.length})</h2>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Model</th><th>Provider</th><th>Tier</th><th>Worst case</th><th>Reason</th></tr>
+              </thead>
+              <tbody>
+                {r.skipped.map((x) => (
+                  <tr key={`${x.slug}:${x.provider}`}>
+                    <td>{x.slug}</td>
+                    <td>{x.provider}</td>
+                    <td>{x.priceTier}</td>
+                    <td className="num">{formatUsd(x.worstCaseCostUsd)}</td>
+                    <td style={{ whiteSpace: "normal" }}>{x.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
       <p className="hint">
-        Run {r.runId.slice(0, 8)}. Realizah spent about {formatUsd(r.actualExecutionCostUsd)} running this comparison (limit{" "}
-        {formatUsd(r.executionBudgetUsd)}). {typeof r.remaining === "number" ? `${r.remaining} free comparisons left today.` : null}
+        Run {r.runId.slice(0, 8)}. {r.considered} models considered; filtered before any call:{" "}
+        {Object.entries(r.filtered).map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(", ") || "none"}.{" "}
+        {typeof r.remaining === "number" ? `${r.remaining} free comparisons left today.` : null}
       </p>
     </section>
   );
@@ -265,6 +299,7 @@ function Card({ x, budgetUsd }: { x: ResultDTO; budgetUsd: number | null }) {
         {x.cheaperCost ? <span className="chip rec">Cheaper cost</span> : null}
         {x.betterCost ? <span className="chip rec">Better cost</span> : null}
         <span className={`chip ${status === "PASS" ? "ok" : "bad"}`}>{status}</span>
+        {x.labelEligible ? null : <span className="chip">free-tier screening</span>}
       </div>
       <div>
         <h3>{x.model}</h3>
@@ -272,7 +307,7 @@ function Card({ x, budgetUsd }: { x: ResultDTO; budgetUsd: number | null }) {
       </div>
       <dl className="stats">
         <div><dt>Estimated cost</dt><dd>{formatUsd(x.estimatedCostUsd)}</dd></div>
-        <div><dt>$ per success</dt><dd>{x.passed ? formatUsd(x.costPerSuccessUsd) : "unavailable"}</dd></div>
+        <div><dt>$ per success</dt><dd>{!x.labelEligible ? "not labeled" : x.passed ? formatUsd(x.costPerSuccessUsd) : "unavailable"}</dd></div>
         <div><dt>Latency</dt><dd>{x.latencyMs !== null ? `${(x.latencyMs / 1000).toFixed(1)}s` : "-"}</dd></div>
         <div><dt>Tokens in/out</dt><dd>{x.inputTokens ?? "-"} / {x.outputTokens ?? "-"}</dd></div>
         {x.wordCount !== null ? <div><dt>Words</dt><dd>{x.wordCount}</dd></div> : null}
@@ -284,6 +319,11 @@ function Card({ x, budgetUsd }: { x: ResultDTO; budgetUsd: number | null }) {
         ) : null}
       </dl>
       {x.failureReason ? <p className="why" style={{ color: "var(--fail)" }}>{x.failureReason}</p> : null}
+      {x.labelEligible ? null : (
+        <p className="hint" style={{ margin: 0 }}>
+          Free-tier screening run: free tiers are rate-limited and not a stable price, so this result never gets a cost label.
+        </p>
+      )}
       <p className="hint" style={{ margin: 0 }}>
         ${x.inputUsdPer1m} in / ${x.outputUsdPer1m} out per 1M tokens, {x.priceStatus}, as of {asOf(x.priceObservedAt)}
       </p>

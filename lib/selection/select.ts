@@ -1,27 +1,39 @@
-// Candidate selection: which registry models run this task.
+// Candidate selection: everything here happens BEFORE any model call, from
+// registry data only. It produces an ordered queue; the progressive runner
+// (comparison/progressive.ts) decides how much of it actually executes.
 //
-// 1. Capability filter  output modality, text input, context window, output length
-// 2. Access filter      a configured provider serves it at a known price
-// 3. Budget filter      user's per-task budget, then Realizah's execution budget
-// 4. Relevance          task-relevant benchmark signal, task-relevant verified
-//                       capabilities, freshness (signals, never proof)
-// 5. Diversity          round-robin across creators with a per-creator cap,
-//                       plus a share of slots for the cheapest capable models
+// 1. Capability   output modality, text input, context window, output capacity
+// 2. Access       configured provider, known price, not a known-incompatible id
+// 3. Cost         worst case per model within MAX_COST_PER_CANDIDATE_USD and the
+//                 run cap; then the user's per-task budget
+// 4. Relevance    task-relevant benchmark, verified capabilities, freshness
+//                 (signals only; nothing is ranked as a winner)
+// 5. Dedupe       one model per family (dated snapshots, variants)
+// 6. Tiers        low / mid / high by worst-case cost, so no tier is skipped
+// 7. Queue        a diverse core (one per tier, distinct creators), then
+//                 expansion in creator round-robin order
+// Free-tier variants are kept apart as screening runs: shown, never labeled.
 //
 // Pure: no database, no env, no network.
 import type { ExecutionLimits } from "../config";
-import { worstCaseCostUsd } from "../pricing";
+import { expectedInputTokens, taskCostUsd, worstCaseCostUsd, worstCaseInputTokens } from "../pricing";
 import type { RegistryAccess, RegistryModel } from "../registry/types";
-import { outputTokensFor, plannedOutputTokens } from "../task/outputBudget";
+import { expectedOutputTokens, outputBudget, outputTokensFor } from "../task/outputBudget";
 import type { TaskUnderstanding } from "../task/understand";
+
+export type CandidateRole = "free_screening" | "core" | "expansion";
+export type PriceTier = "free" | "low" | "mid" | "high";
 
 export type Candidate = {
   model: RegistryModel;
   access: RegistryAccess;
   maxOutputTokens: number;
   worstCaseCostUsd: number;
+  expectedCostUsd: number;
   relevance: number;
   rank: number;
+  role: CandidateRole;
+  priceTier: PriceTier;
   reason: string;
 };
 
@@ -30,36 +42,43 @@ export type ExclusionReason =
   | "context_too_small"
   | "output_limit_too_small"
   | "no_configured_provider"
+  | "incompatible_access"
+  | "free_tier_only"
   | "price_unknown"
-  | "near_duplicate"
+  | "excessive_cost"
   | "exceeds_user_budget"
-  | "exceeds_execution_budget"
-  | "over_target";
+  | "near_duplicate"
+  | "beyond_queue";
 
 export type SelectionResult = {
+  // Paid queue in execution order (core first, then expansion), plus free
+  // screening runs. Nothing here has run yet.
   candidates: Candidate[];
-  // Capable of the task regardless of which providers we hold keys for.
+  screening: Candidate[];
+  considered: number;
   capableInRegistry: number;
   excluded: Partial<Record<ExclusionReason, number>>;
   overUserBudget: { slug: string; worstCaseCostUsd: number }[];
-  estimatedExecutionCostUsd: number;
-  executionBudgetUsd: number;
+  tiersAvailable: PriceTier[];
+  creatorsAvailable: number;
   plannedOutputTokens: number;
+  outputBudgetBasis: string;
+  // Expected spend of the core set (an estimate; the cap uses worst cases).
+  estimatedExecutionCostUsd: number;
+  worstCaseCoreUsd: number;
+  executionBudgetUsd: number;
   target: number;
 };
 
-const BENCHMARK_FOR: Record<string, string> = {
-  coding: "coding_index",
-  mathematics: "math_index",
-};
+const BENCHMARK_FOR: Record<string, string> = { coding: "coding_index", mathematics: "math_index" };
 const REASONING_TASKS = new Set(["reasoning", "mathematics", "analysis", "coding", "research"]);
 
-function isFree(a: RegistryAccess) {
+export function isFreeAccess(a: RegistryAccess): boolean {
   return a.externalModelId.endsWith(":free");
 }
 
-// "openai/gpt-4o-mini-2024-07-18" and "openai/gpt-4o-mini" are the same
-// family; variants like ":thinking" or ":beta" too. One per family.
+// "openai/gpt-4o-mini-2024-07-18" and "openai/gpt-4o-mini" are one family;
+// so are variants like ":thinking" or ":beta". One per family.
 export function familyKey(slug: string): string {
   return slug
     .replace(/:[a-z-]+$/i, "")
@@ -68,9 +87,19 @@ export function familyKey(slug: string): string {
     .toLowerCase();
 }
 
-function addCount(e: SelectionResult["excluded"], r: ExclusionReason, n = 1) {
+function count(e: SelectionResult["excluded"], r: ExclusionReason, n = 1) {
   e[r] = (e[r] ?? 0) + n;
 }
+
+type Scored = {
+  m: RegistryModel;
+  access: RegistryAccess;
+  maxOut: number;
+  worst: number;
+  expected: number;
+  score: number;
+  reasons: string[];
+};
 
 export function selectCandidates(opts: {
   registry: RegistryModel[];
@@ -78,193 +107,231 @@ export function selectCandidates(opts: {
   providers: ReadonlySet<string>;
   limits: ExecutionLimits;
   userBudgetUsd?: number | null;
+  // The exact task text, for the byte-level input bound.
+  taskText?: string;
   now?: Date;
 }): SelectionResult {
   const { understanding: u, limits } = opts;
   const now = opts.now ?? new Date();
-  const target = limits.maxCandidates;
   const excluded: SelectionResult["excluded"] = {};
-  const planned = plannedOutputTokens(u, limits);
-  const inputTokens = u.constraints.estimatedInputTokens + 16;
+  const budget = outputBudget(u, limits);
+  const planned = budget.tokens;
+  const worstIn = opts.taskText !== undefined ? worstCaseInputTokens(opts.taskText) : u.constraints.estimatedInputTokens * 4 + 16;
+  const expectedIn = opts.taskText !== undefined ? expectedInputTokens(opts.taskText) : u.constraints.estimatedInputTokens + 16;
+  const perCandidateCap = Math.min(limits.maxCostPerCandidateUsd, limits.maxExecutionCostUsd);
 
   // 1. Capability.
   const capable: { m: RegistryModel; maxOut: number }[] = [];
   for (const m of opts.registry) {
     if (m.status !== "active") continue;
-    // Text tasks go to text-only models: dedicated audio/image generators that
-    // also emit text are not substitutes (their metadata says so).
-    const outputOk = u.outputModality === "text" ? m.outputModalities.length === 1 && m.outputModalities[0] === "text" : m.outputModalities.includes(u.outputModality);
+    // Text tasks go to text-only models; media generators that also emit
+    // text are not substitutes.
+    const outputOk =
+      u.outputModality === "text" ? m.outputModalities.length === 1 && m.outputModalities[0] === "text" : m.outputModalities.includes(u.outputModality);
     if (!outputOk || !m.inputModalities.includes("text")) {
-      addCount(excluded, "wrong_modality");
+      count(excluded, "wrong_modality");
       continue;
     }
-    const reasoning = m.capabilities.includes("reasoning");
-    const maxOut = outputTokensFor(reasoning, planned, limits, m.maxOutputTokens);
-    if (m.maxOutputTokens !== null && m.maxOutputTokens < Math.min(planned, limits.maxOutputTokens)) {
-      addCount(excluded, "output_limit_too_small");
+    const maxOut = outputTokensFor(m.capabilities.includes("reasoning"), planned, limits, m.maxOutputTokens);
+    if (m.maxOutputTokens !== null && m.maxOutputTokens < planned) {
+      count(excluded, "output_limit_too_small");
       continue;
     }
-    if (m.contextWindow !== null && m.contextWindow < inputTokens + maxOut) {
-      addCount(excluded, "context_too_small");
+    if (m.contextWindow !== null && m.contextWindow < worstIn + maxOut) {
+      count(excluded, "context_too_small");
       continue;
     }
     capable.push({ m, maxOut });
   }
 
-  // 2. Access: cheapest priced path through a configured provider.
-  type Priced = { m: RegistryModel; access: RegistryAccess; maxOut: number; worst: number };
-  const priced: Priced[] = [];
+  // 2 + 3. Access and cost preflight.
+  const paid: Omit<Scored, "score" | "reasons">[] = [];
+  const freeOptions: Omit<Scored, "score" | "reasons">[] = [];
+  const overUserBudget: SelectionResult["overUserBudget"] = [];
   for (const { m, maxOut } of capable) {
-    const reachable = m.access.filter((a) => opts.providers.has(a.providerId) && !isFree(a) && a.chatSupported !== false);
-    if (!reachable.length) {
-      addCount(excluded, "no_configured_provider");
+    const configured = m.access.filter((a) => opts.providers.has(a.providerId));
+    if (!configured.length) {
+      count(excluded, "no_configured_provider");
       continue;
     }
-    let best: Priced | null = null;
-    for (const a of reachable) {
-      const worst = worstCaseCostUsd(inputTokens, maxOut, a);
-      if (worst === null || a.priceStatus === "unknown") continue;
+    const usable = configured.filter((a) => a.chatSupported !== false);
+    if (!usable.length) {
+      count(excluded, "incompatible_access");
+      continue;
+    }
+    for (const a of usable.filter(isFreeAccess)) {
+      if (a.priceStatus !== "unknown" && a.inputUsdPer1m === 0 && a.outputUsdPer1m === 0) {
+        freeOptions.push({ m, access: a, maxOut, worst: 0, expected: 0 });
+      }
+    }
+    const paidPaths = usable.filter((a) => !isFreeAccess(a) && a.priceStatus !== "unknown");
+    if (!paidPaths.length) {
+      count(excluded, usable.some((a) => !isFreeAccess(a)) ? "price_unknown" : "free_tier_only");
+      continue;
+    }
+    let best: Omit<Scored, "score" | "reasons"> | null = null;
+    for (const a of paidPaths) {
+      const worst = worstCaseCostUsd(worstIn, maxOut, a);
+      if (worst === null) continue;
+      const expected = taskCostUsd(expectedIn, expectedOutputTokens(u, maxOut), a) ?? worst;
       const better =
         !best || worst < best.worst - 1e-12 || (Math.abs(worst - best.worst) <= 1e-12 && best.access.providerId === "openrouter" && a.providerId !== "openrouter");
-      if (better) best = { m, access: a, maxOut, worst };
+      if (better) best = { m, access: a, maxOut, worst, expected };
     }
     if (!best) {
-      addCount(excluded, "price_unknown");
+      count(excluded, "price_unknown");
       continue;
     }
-    priced.push(best);
+    if (best.worst > perCandidateCap) {
+      count(excluded, "excessive_cost");
+      continue;
+    }
+    if (opts.userBudgetUsd != null && best.worst > opts.userBudgetUsd) {
+      overUserBudget.push({ slug: m.slug, worstCaseCostUsd: best.worst });
+      count(excluded, "exceeds_user_budget");
+      continue;
+    }
+    paid.push(best);
   }
 
-  // 3a. User budget: can't afford even one task at worst case.
-  const overUserBudget: SelectionResult["overUserBudget"] = [];
-  let affordable = priced;
-  if (opts.userBudgetUsd !== undefined && opts.userBudgetUsd !== null) {
-    affordable = priced.filter((p) => {
-      if (p.worst <= opts.userBudgetUsd!) return true;
-      overUserBudget.push({ slug: p.m.slug, worstCaseCostUsd: p.worst });
-      addCount(excluded, "exceeds_user_budget");
-      return false;
-    });
-  }
-
-  // 4. Relevance (signals only).
+  // 4. Relevance signals.
   const metric = BENCHMARK_FOR[u.primary] ?? "intelligence_index";
-  const maxBench = Math.max(0, ...affordable.map((p) => p.m.benchmarks[metric] ?? 0));
-  const scored = affordable.map((p) => {
+  const maxBench = Math.max(0, ...[...paid, ...freeOptions].map((p) => p.m.benchmarks[metric] ?? 0));
+  const score = (p: Omit<Scored, "score" | "reasons">): Scored => {
     const reasons: string[] = [];
-    let score = 0.3;
+    let s = 0.3;
     const b = p.m.benchmarks[metric];
     if (b !== undefined && maxBench > 0) {
-      score += 0.4 * (b / maxBench);
+      s += 0.4 * (b / maxBench);
       reasons.push(`${metric.replace(/_/g, " ")} ${Math.round(b * 10) / 10}`);
-    } else {
-      score += 0.15;
-    }
+    } else s += 0.15;
     const caps = new Set(p.m.capabilities);
     if (REASONING_TASKS.has(u.primary) && caps.has("reasoning")) {
-      score += 0.15;
+      s += 0.15;
       reasons.push("reasoning");
     }
     if ((u.primary === "structured_json" || u.constraints.outputFormat === "json") && caps.has("structured_output")) {
-      score += 0.15;
+      s += 0.15;
       reasons.push("structured output");
     }
     if (p.m.releaseDate) {
-      const ageDays = (now.getTime() - new Date(p.m.releaseDate).getTime()) / 86_400_000;
-      if (ageDays <= 365) score += 0.1;
-      else if (ageDays <= 730) score += 0.05;
+      const age = (now.getTime() - new Date(p.m.releaseDate).getTime()) / 86_400_000;
+      s += age <= 365 ? 0.1 : age <= 730 ? 0.05 : 0;
     }
-    return { ...p, score, reasons };
+    return { ...p, score: s, reasons };
+  };
+
+  // 5. One per family.
+  const dedupe = (rows: Scored[], tally: boolean) => {
+    const byFamily = new Map<string, Scored>();
+    for (const r of rows) {
+      const k = familyKey(r.m.slug);
+      const prev = byFamily.get(k);
+      if (!prev || r.score > prev.score || (r.score === prev.score && (r.m.releaseDate ?? "") > (prev.m.releaseDate ?? ""))) {
+        if (prev && tally) count(excluded, "near_duplicate");
+        byFamily.set(k, r);
+      } else if (tally) count(excluded, "near_duplicate");
+    }
+    return [...byFamily.values()];
+  };
+  const pool = dedupe(paid.map(score), true);
+
+  // 6. Price tiers by worst-case cost (terciles of the eligible pool).
+  const byCost = [...pool].sort((a, b) => a.worst - b.worst);
+  const tierOf = new Map<string, PriceTier>();
+  byCost.forEach((p, i) => {
+    const t: PriceTier = byCost.length < 3 ? (i === 0 ? "low" : i === byCost.length - 1 ? "high" : "mid") : i < byCost.length / 3 ? "low" : i < (2 * byCost.length) / 3 ? "mid" : "high";
+    tierOf.set(p.m.slug, t);
   });
+  const tiersAvailable = (["low", "mid", "high"] as PriceTier[]).filter((t) => [...tierOf.values()].includes(t));
 
-  // Near-duplicates: keep the most relevant member of each family.
-  const byFamily = new Map<string, (typeof scored)[number]>();
-  for (const s of scored) {
-    const k = familyKey(s.m.slug);
-    const prev = byFamily.get(k);
-    if (!prev || s.score > prev.score || (s.score === prev.score && (s.m.releaseDate ?? "") > (prev.m.releaseDate ?? ""))) {
-      if (prev) addCount(excluded, "near_duplicate");
-      byFamily.set(k, s);
-    } else {
-      addCount(excluded, "near_duplicate");
-    }
-  }
-  const pool = [...byFamily.values()];
-
-  // 5. Diversity: round-robin across creators, then reserve slots for the
-  // cheapest capable models so the price range is represented.
-  const byCreator = new Map<string, typeof pool>();
-  for (const p of pool) {
-    const list = byCreator.get(p.m.creator) ?? [];
-    list.push(p);
-    byCreator.set(p.m.creator, list);
-  }
+  // 7. Queue: diverse core, then creator round-robin expansion.
+  const byCreator = new Map<string, Scored[]>();
+  for (const p of pool) byCreator.set(p.m.creator, [...(byCreator.get(p.m.creator) ?? []), p]);
   for (const list of byCreator.values()) list.sort((a, b) => b.score - a.score || a.worst - b.worst);
   const creators = [...byCreator.entries()].sort((a, b) => b[1][0].score - a[1][0].score).map(([c]) => c);
-  const perCreatorCap = Math.max(2, Math.ceil(target / Math.max(1, creators.length)));
 
-  const ordered: typeof pool = [];
-  const taken = new Set<string>();
-  const perCreator = new Map<string, number>();
-  const take = (p: (typeof pool)[number], cap: number) => {
-    if (taken.has(p.m.slug) || (perCreator.get(p.m.creator) ?? 0) >= cap) return false;
-    taken.add(p.m.slug);
-    perCreator.set(p.m.creator, (perCreator.get(p.m.creator) ?? 0) + 1);
-    ordered.push(p);
-    return true;
+  const core: Scored[] = [];
+  const usedCreators = new Set<string>();
+  const pickFrom = (rows: Scored[]) => {
+    const fresh = rows.filter((r) => !core.includes(r));
+    return fresh.find((r) => !usedCreators.has(r.m.creator)) ?? fresh[0];
   };
-  const roundRobin = (limit: number, cap: number) => {
-    let progress = true;
-    while (ordered.length < limit && progress) {
-      progress = false;
-      for (const c of creators) {
-        if (ordered.length >= limit) break;
-        const next = byCreator.get(c)!.find((p) => !taken.has(p.m.slug));
-        if (next && take(next, cap)) progress = true;
+  const take = (r: Scored | undefined) => {
+    if (!r) return;
+    core.push(r);
+    usedCreators.add(r.m.creator);
+  };
+  // One per tier, most relevant first within the tier.
+  for (const t of tiersAvailable) {
+    if (core.length >= limits.minCandidates) break;
+    take(pickFrom(pool.filter((p) => tierOf.get(p.m.slug) === t).sort((a, b) => b.score - a.score)));
+  }
+  // Fill the core with new creators first, in relevance order.
+  const roundRobin: Scored[] = [];
+  for (let i = 0; roundRobin.length < pool.length; i++) {
+    let added = false;
+    for (const c of creators) {
+      const row = byCreator.get(c)![i];
+      if (row) {
+        roundRobin.push(row);
+        added = true;
       }
     }
-  };
-  const relevanceSlots = Math.ceil(target * 0.75);
-  roundRobin(relevanceSlots, perCreatorCap);
-  for (const p of [...pool].sort((a, b) => a.worst - b.worst)) {
-    if (ordered.length >= target) break;
-    take(p, perCreatorCap + 1);
+    if (!added) break;
   }
-  roundRobin(pool.length, pool.length); // leftovers, in case the budget skips some
+  while (core.length < Math.min(limits.minCandidates, pool.length)) take(pickFrom(roundRobin));
+  // Cheapest core member runs first: it doubles as the paid screening run.
+  core.sort((a, b) => a.worst - b.worst);
 
-  // 3b. Realizah's own execution budget, in the order above.
-  const candidates: Candidate[] = [];
-  let spend = 0;
-  for (const p of ordered) {
-    if (candidates.length >= target) {
-      addCount(excluded, "over_target");
-      continue;
-    }
-    if (spend + p.worst > limits.maxExecutionCostUsd) {
-      addCount(excluded, "exceeds_execution_budget");
-      continue;
-    }
-    spend += p.worst;
-    const price = `$${p.access.inputUsdPer1m}/$${p.access.outputUsdPer1m} per 1M via ${p.access.providerId}`;
-    candidates.push({
-      model: p.m,
-      access: p.access,
-      maxOutputTokens: p.maxOut,
-      worstCaseCostUsd: p.worst,
-      relevance: Math.round(p.score * 1000) / 1000,
-      rank: candidates.length + 1,
-      reason: [`${u.outputModality} output`, ...p.reasons, price].join("; "),
-    });
-  }
+  const expansion = roundRobin.filter((r) => !core.includes(r));
+  const queueLimit = limits.maxCandidates * 2; // room to skip and continue under the cap
+  const queue = [...core, ...expansion].slice(0, queueLimit);
+  if (pool.length > queue.length) count(excluded, "beyond_queue", pool.length - queue.length);
 
+  const toCandidate = (p: Scored, rank: number, role: CandidateRole, tier: PriceTier): Candidate => ({
+    model: p.m,
+    access: p.access,
+    maxOutputTokens: p.maxOut,
+    worstCaseCostUsd: p.worst,
+    expectedCostUsd: p.expected,
+    relevance: Math.round(p.score * 1000) / 1000,
+    rank,
+    role,
+    priceTier: tier,
+    reason: [
+      `${u.outputModality} output`,
+      `${tier} price tier`,
+      ...p.reasons,
+      tier === "free" ? `free tier via ${p.access.providerId}` : `$${p.access.inputUsdPer1m}/$${p.access.outputUsdPer1m} per 1M via ${p.access.providerId}`,
+    ].join("; "),
+  });
+  const candidates = queue.map((p, i) => toCandidate(p, i + 1, i < core.length ? "core" : "expansion", tierOf.get(p.m.slug)!));
+
+  // Free screening: different families from each other, most relevant first.
+  const screening =
+    limits.freeScreeningModels > 0 && candidates.length >= 2
+      ? dedupe(freeOptions.map(score), false)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limits.freeScreeningModels)
+          .map((p, i) => toCandidate(p, i + 1, "free_screening", "free"))
+      : [];
+
+  const coreCands = candidates.filter((c) => c.role === "core");
   return {
     candidates,
+    screening,
+    considered: opts.registry.filter((m) => m.status === "active").length,
     capableInRegistry: capable.length,
     excluded,
     overUserBudget: overUserBudget.sort((a, b) => a.worstCaseCostUsd - b.worstCaseCostUsd),
-    estimatedExecutionCostUsd: spend,
-    executionBudgetUsd: limits.maxExecutionCostUsd,
+    tiersAvailable,
+    creatorsAvailable: creators.length,
     plannedOutputTokens: planned,
-    target,
+    outputBudgetBasis: budget.basis,
+    estimatedExecutionCostUsd: coreCands.reduce((s, c) => s + c.expectedCostUsd, 0),
+    worstCaseCoreUsd: coreCands.reduce((s, c) => s + c.worstCaseCostUsd, 0),
+    executionBudgetUsd: limits.maxExecutionCostUsd,
+    target: limits.maxCandidates,
   };
 }

@@ -86,7 +86,36 @@ audio file; agentic tasks needing tools or browsing. Text models are never offer
 5. Diversity: round-robin across model creators with a per-creator cap, plus a quarter of the slots for the
    cheapest capable models so the price range is represented.
 
-Up to `MAX_CANDIDATES_PER_RUN` (20) are selected; fewer when fewer are relevant or affordable.
+Selection produces an ordered queue (a diverse core, then expansion); the progressive runner below decides
+how much of it runs, up to `MAX_CANDIDATES_PER_RUN` (10) paid models.
+
+## Cost controls and progressive comparison
+
+Everything below happens before or between model calls; none of it changes the definitions of the labels.
+
+- **Registry-first filtering** (no calls): wrong modality, too-small context, too-small output capacity,
+  no configured provider, access paths a provider said it can't serve, unknown prices, near-duplicates, and
+  models whose worst case for this one task exceeds `MAX_COST_PER_CANDIDATE_USD` (default: a third of the cap).
+- **Per-task output ceilings** (`lib/task/outputBudget.ts`): a 100-word email gets 204 tokens, a 1,000-word
+  article 1,674 (the +15% pass range), JSON 128 + 48 per field, code 600 to 2,400 scaled to the task (x1.5 with
+  tests), lists by item count. `MAX_OUTPUT_TOKENS` (4096) stays the hard global ceiling. Reasoning models get
+  extra headroom equal to the planned answer, at most `REASONING_HEADROOM_TOKENS` (1024).
+- **Price tiers and a diverse core**: eligible models are split into low/mid/high tiers by worst-case cost. The
+  core (`MIN_CANDIDATES_PER_RUN`, 4) takes the most relevant model from each tier, from distinct creators.
+- **Waves**: (0) screening: free-tier variants (`FREE_SCREENING_MODELS`, $0) plus the cheapest core model;
+  (1) the rest of the core; (2+) expansion two at a time, uncovered tiers first, then uncovered creators.
+  After each wave from 1 on, Realizah stops once the comparison is meaningful: at least 4 paid models ran,
+  at least 2 passed, every available tier was tried, and at least min(3, available) creators. The rule never
+  looks at which model is cheapest, so stopping can't favor cheap models. Otherwise it continues up to
+  `MAX_CANDIDATES_PER_RUN` (10).
+- **Free tiers never get labels.** Free endpoints are rate-limited and not a stable price; their results are
+  shown as screening runs. Screening alone never ends a comparison, and labels need at least two paid runs.
+- **Hard cap**: a paid call launches only if actual spend + in-flight worst-case reservations + its own worst
+  case fit `MAX_EXECUTION_COST_USD`. Worst case = UTF-8 bytes of the task (no byte-level tokenizer produces
+  more tokens than bytes) + message overhead, plus the call's max output tokens, at its price snapshot. A
+  timed-out call is charged its worst case. If any call ever bills above its reserved bound, launching stops.
+- **Audit**: each run stores candidates considered, filtered (by reason), queued, executed and skipped (with
+  reason), the expected cost beforehand, the peak reserved worst case, the actual cost, and the stop reason.
 
 ## Same task, same input
 
@@ -117,8 +146,9 @@ score.
 
 ## Safety limits
 
-`MAX_CANDIDATES_PER_RUN` (20), `MAX_EXECUTION_COST_USD` ($0.10 worst case per comparison, checked before any
-call), `MAX_OUTPUT_TOKENS` (4096), `TIMEOUT_MS` (60s per model), `MAX_CONCURRENT_MODELS` (8),
+`MAX_CANDIDATES_PER_RUN` (10), `MIN_CANDIDATES_PER_RUN` (4), `MAX_EXECUTION_COST_USD` ($0.03 hard cap per
+comparison, enforced per call), `MAX_COST_PER_CANDIDATE_USD` ($0.01), `MAX_OUTPUT_TOKENS` (4096 global; per-task
+ceilings below it), `TIMEOUT_MS` (60s per model), `MAX_CONCURRENT_MODELS` (5), `FREE_SCREENING_MODELS` (2),
 3 free comparisons per day per hashed IP. Unsupported tasks and empty candidate sets are refused before any
 spend or rate-limit use. All execution is server-side; keys never reach the browser.
 
