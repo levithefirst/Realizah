@@ -384,6 +384,19 @@ export async function runComparison(input: ComparisonInput, ipHash: string, sele
     client.release();
   }
 
+  // Remember access paths the provider said can't do chat completions, so
+  // they aren't selected again. Learned from the provider, not from names.
+  const unsupported = outcomes.filter((o) => o.run.errorKind === "unsupported_endpoint");
+  if (unsupported.length) {
+    db()
+      .query(
+        `update model_provider_access set chat_supported = false, chat_supported_detail = x.detail, chat_supported_checked_at = now()
+           from jsonb_to_recordset($1::jsonb) as x(id uuid, detail text) where model_provider_access.id = x.id`,
+        [JSON.stringify(unsupported.map((o) => ({ id: o.candidate.access.accessId, detail: o.run.error })))]
+      )
+      .catch(() => {});
+  }
+
   // 14-day retention for comparison data, as the privacy page states.
   db()
     .query(

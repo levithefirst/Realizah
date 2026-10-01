@@ -63,6 +63,8 @@ export type RegistryAccess = {
   requestUsd: number;
   priceStatus: PriceStatus;
   priceObservedAt: string | null;
+  // false when the provider said this id does not serve chat completions.
+  chatSupported?: boolean | null;
 };
 
 export type RegistryModel = {

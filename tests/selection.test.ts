@@ -126,3 +126,16 @@ test("benchmarks are signals only: a model without benchmarks is still eligible"
   const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS });
   assert.equal(r.candidates.length, 2);
 });
+
+test("text tasks exclude dedicated media models and ids a provider said can't chat", () => {
+  const reg = [
+    model("a/text"),
+    model("b/audio-and-text", { outputModalities: ["text", "audio"] }),
+    model("c/instruct", { access: [{ ...access("openrouter", "c/instruct", 0.1, 0.1), chatSupported: false }] }),
+    model("d/text"),
+  ];
+  const r = selectCandidates({ registry: reg, understanding: writing, providers: OR, limits: LIMITS });
+  assert.deepEqual(r.candidates.map((c) => c.model.slug).sort(), ["a/text", "d/text"]);
+  assert.equal(r.excluded.wrong_modality, 1);
+  assert.equal(r.excluded.no_configured_provider, 1);
+});

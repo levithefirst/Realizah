@@ -1,5 +1,5 @@
 // Shared chat-completions call for OpenAI-compatible APIs (OpenRouter, OpenAI).
-import { caughtFailure, errorKindFromStatus, failure, type RunModelRequest, type RunModelResult } from "./types";
+import { caughtFailure, errorKindFromResponse, failure, type RunModelRequest, type RunModelResult } from "./types";
 
 export async function chatCompletions(opts: {
   url: string;
@@ -20,7 +20,7 @@ export async function chatCompletions(opts: {
     const json = (await res.json().catch(() => null)) as any;
     if (!res.ok) {
       const message = json?.error?.message ?? `HTTP ${res.status}`;
-      return failure(started, String(message).slice(0, 300), errorKindFromStatus(res.status));
+      return failure(started, String(message).slice(0, 300), errorKindFromResponse(res.status, String(message)));
     }
     if (json?.error) {
       return failure(started, String(json.error.message ?? "provider error").slice(0, 300), "provider_error");

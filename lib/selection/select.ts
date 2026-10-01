@@ -91,7 +91,10 @@ export function selectCandidates(opts: {
   const capable: { m: RegistryModel; maxOut: number }[] = [];
   for (const m of opts.registry) {
     if (m.status !== "active") continue;
-    if (!m.outputModalities.includes(u.outputModality) || !m.inputModalities.includes("text")) {
+    // Text tasks go to text-only models: dedicated audio/image generators that
+    // also emit text are not substitutes (their metadata says so).
+    const outputOk = u.outputModality === "text" ? m.outputModalities.length === 1 && m.outputModalities[0] === "text" : m.outputModalities.includes(u.outputModality);
+    if (!outputOk || !m.inputModalities.includes("text")) {
       addCount(excluded, "wrong_modality");
       continue;
     }
@@ -112,7 +115,7 @@ export function selectCandidates(opts: {
   type Priced = { m: RegistryModel; access: RegistryAccess; maxOut: number; worst: number };
   const priced: Priced[] = [];
   for (const { m, maxOut } of capable) {
-    const reachable = m.access.filter((a) => opts.providers.has(a.providerId) && !isFree(a));
+    const reachable = m.access.filter((a) => opts.providers.has(a.providerId) && !isFree(a) && a.chatSupported !== false);
     if (!reachable.length) {
       addCount(excluded, "no_configured_provider");
       continue;

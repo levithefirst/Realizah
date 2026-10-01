@@ -22,7 +22,7 @@ export async function loadRegistry(): Promise<RegistryModel[]> {
             'accessId', a.id, 'providerId', a.provider_id, 'externalModelId', a.external_model_id,
             'priceId', p.id, 'inputUsdPer1m', p.input_usd_per_1m, 'outputUsdPer1m', p.output_usd_per_1m,
             'requestUsd', coalesce(p.request_usd, 0), 'priceStatus', coalesce(p.price_status, 'unknown'),
-            'priceObservedAt', p.observed_at))
+            'priceObservedAt', p.observed_at, 'chatSupported', a.chat_supported))
             from model_provider_access a
             left join lateral (
               select * from model_prices mp where mp.access_id = a.id order by mp.observed_at desc limit 1) p on true
