@@ -1,0 +1,10 @@
+import { PGlite } from "@electric-sql/pglite";
+import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
+import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
+import { readdir, readFile } from "node:fs/promises";
+const db = new PGlite({ extensions: { pgcrypto } });
+const dir = "/home/user/Realizah/db/migrations/";
+for (const f of (await readdir(dir)).sort()) await db.exec(await readFile(dir + f, "utf8"));
+const server = new PGLiteSocketServer({ db, port: 5433, host: "127.0.0.1" });
+await server.start();
+console.log("pglite listening 5433");
