@@ -12,7 +12,7 @@ export default function Terms() {
       </ul>
       <h2>No warranty on the eval</h2>
       <p>
-        A comparison is one short run on one fictional fixture with simple automatic checks. It is a signal, not a
+        A comparison is one short run of your task on each selected model, with simple automatic checks. It is a signal, not a
         guarantee. Model output varies between runs, prices change, and a model that passes here may fail on your real
         work. The service is provided as is, without warranty of any kind.
       </p>

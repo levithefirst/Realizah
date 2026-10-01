@@ -15,14 +15,14 @@ export default function Privacy() {
       <h2>What we do not store</h2>
       <ul>
         <li>No accounts, emails, cookies for tracking, or analytics profiles.</li>
-        <li>No files. Every comparison runs on a short fictional fixture, not your documents.</li>
+        <li>No files or uploads. Only the task text you type is sent to the models. Leave it empty and a fictional sample ticket is used instead.</li>
         <li>Model answers are shown to you and not saved to our database.</li>
       </ul>
       <h2>Retention</h2>
       <p>Runs, results and audit events are deleted after 14 days. Rate-limit counters are deleted after 2 days.</p>
       <h2>Sharing</h2>
       <p>
-        We do not sell or rent data. Your task text and the fixture are sent to OpenAI to run the comparison,
+        We do not sell or rent data. Your task text (or, for a demo run, the fictional sample ticket) is sent to OpenAI to run the comparison,
         under OpenAI&apos;s API data policy. Our OpenAI key and database credentials stay on the server and are never sent to your browser.
       </p>
       <h2>Contact</h2>

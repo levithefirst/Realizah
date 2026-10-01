@@ -1,24 +1,11 @@
 // Server-only OpenAI chat completions client. The key never leaves the server.
 import "server-only";
+import { ModelNotFoundError, type ChatFn } from "./engine";
 
 export const MAX_OUTPUT_TOKENS = 400;
 export const TIMEOUT_MS = 25_000;
 
-export type Completion = {
-  text: string;
-  tokensIn: number;
-  tokensOut: number;
-  latencyMs: number;
-};
-
-export class ModelNotFoundError extends Error {}
-
-export async function chat(opts: {
-  model: string;
-  system: string;
-  user: string;
-  temperature: number;
-}): Promise<Completion> {
+export const chat: ChatFn = async function chat(opts) {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error("OPENAI_API_KEY is not set on the server");
 
@@ -33,10 +20,7 @@ export async function chat(opts: {
       model: opts.model,
       temperature: opts.temperature,
       max_completion_tokens: MAX_OUTPUT_TOKENS,
-      messages: [
-        { role: "system", content: opts.system },
-        { role: "user", content: opts.user },
-      ],
+      messages: opts.messages,
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
     cache: "no-store",
@@ -59,4 +43,4 @@ export async function chat(opts: {
     tokensOut: Number(body?.usage?.completion_tokens ?? 0),
     latencyMs,
   };
-}
+};

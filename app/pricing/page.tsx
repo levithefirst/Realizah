@@ -71,7 +71,7 @@ export default async function Pricing() {
       <div className="panel prose" style={{ marginTop: 20, maxWidth: "none" }}>
         <h2 style={{ marginTop: 0 }}>How the money works</h2>
         <p>
-          Every comparison makes 2 to 3 short model calls on a ~150 word fixture with a 400 token output cap.
+          Every comparison sends your task (up to 600 characters) to 2 or 3 models with a 400 token output cap.
           {avg !== null
             ? ` Measured average model spend per comparison so far: ${formatUsd(avg)} across ${runs} runs.`
             : ` Planning figure until real runs exist: ${formatUsd(perRun)} per comparison.`}

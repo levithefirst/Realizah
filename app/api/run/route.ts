@@ -4,13 +4,14 @@ import { listTools } from "@/lib/tools";
 import { listAiTools } from "@/lib/aiTools";
 import { checkSupport } from "@/lib/support";
 import { normalizeCriteria } from "@/lib/checks";
-import { DEFAULT_TASK } from "@/lib/fixture";
 import { clientIp, hashIp, takeToken } from "@/lib/ratelimit";
 import { compare } from "@/lib/compare";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+const MAX_TASK_CHARS = 600;
 
 function bad(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
@@ -29,11 +30,14 @@ export async function POST(req: Request) {
 
   const toolName = String(body.tool ?? "").slice(0, 80).trim();
   const useCase = String(body.useCase ?? "").slice(0, 200).trim();
-  const task = String(body.task ?? "").slice(0, 600).trim() || DEFAULT_TASK;
+  // Sent to every model exactly as typed. Empty means the demo fixture run;
+  // a typed task is never trimmed, truncated or replaced.
+  const task = typeof body.task === "string" ? body.task : "";
   const modelSlugs = Array.isArray(body.models) ? [...new Set(body.models.map(String))] : [];
   const criteria = normalizeCriteria(body.criteria);
   if (!toolName) return bad("Tell us which AI tool you use now.");
   if (!useCase) return bad("Tell us what you use it for.");
+  if (task.length > MAX_TASK_CHARS) return bad(`Task is too long. Keep it under ${MAX_TASK_CHARS} characters.`);
 
   // Decide support before spending a free run or any model call.
   const registry = await listAiTools();

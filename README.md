@@ -6,7 +6,7 @@
 
 You already pay for an AI tool. Realizah tells you what you pay for each answer that actually works.
 Enter the AI tool you use, what you use it for, and the task to compare. For text-generation tasks,
-Realizah makes real model calls on a short fixture, checks each answer, and labels the results with two
+Realizah sends your task, exactly as written, to each selected model, checks each answer, and labels the results with two
 cost labels: Cheaper cost and Better cost. Other kinds of tools and tasks get a clear "not supported yet".
 No login for the first result.
 
@@ -41,8 +41,12 @@ outcome on their own task before renewing.
    mappings are stored, so the user's tool is never one of the cards.
    You pick 2 or 3 OpenAI models to price the task on. They are labeled as pricing models, not as "the model
    behind your tool".
-3. The server runs your task on a ~150 word fictional support ticket (never your files) for each model in
-   parallel. Max 400 output tokens, 25 second timeout per model.
+3. The server sends your "Task to compare" to every selected model in parallel, exactly as typed: the same
+   single user message for each model, with no wrapper, no added instructions and no fixture. The word cap
+   and banned-phrase checks are applied to the replies, not added to the prompt. Max 600 characters in,
+   400 output tokens, 25 second timeout per model. Only if you leave the task empty does Realizah run a demo:
+   summarizing a ~150 word fictional support ticket. A typed task is never replaced by the demo.
+   `lib/engine.ts` builds the prompt and `tests/engine.test.ts` proves every model gets it unchanged.
 4. Each answer is checked: word cap (default 80) and must not contain "as an AI".
 5. Estimated cost = `(tokens_in * input_rate + tokens_out * output_rate) / 1,000,000` from `tools_seed`.
 6. `cost_per_success_usd` = estimated cost if the answer passed, otherwise null. Failed answers are never
@@ -95,7 +99,7 @@ null with `is_unknown = true` and shown as UNKNOWN.
 
 - **Secrets**: `OPENAI_API_KEY` and `DATABASE_URL` live only in server env (Vercel, Railway, local `.env`).
   Nothing in `NEXT_PUBLIC_*`. `.env` is git-ignored.
-- **Data minimization**: the model sees a fixed fictional fixture plus the user's one-line task. No uploads.
+- **Data minimization**: the models see only the task text the user typed (or the fictional demo ticket when the task is empty). No uploads.
   Model answers are shown to the user and not stored.
 - **Privacy**: IPs are stored only as a salted SHA-256 hash for rate limiting.
 - **Retention**: runs and audit events older than 14 days are deleted on each new run; rate-limit rows after
@@ -133,6 +137,7 @@ npm install
 cp .env.example .env        # fill DATABASE_URL and OPENAI_API_KEY
 node --env-file=.env scripts/db-setup.mjs   # applies schema + seed (idempotent)
 npm run dev                 # http://localhost:3000
+npm test                    # engine, support and label tests
 npm run build && npm start  # production build
 ```
 

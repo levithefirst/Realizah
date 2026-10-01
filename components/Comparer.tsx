@@ -27,7 +27,8 @@ export default function Comparer({
 }) {
   const [toolName, setToolName] = useState("");
   const [useCase, setUseCase] = useState("");
-  const [task, setTask] = useState(defaultTask);
+  // Empty by default: an empty task runs the demo, anything typed is sent as is.
+  const [task, setTask] = useState("");
   const [models, setModels] = useState<string[]>(() => tools.slice(0, 3).map((t) => t.slug));
   const [wordCap, setWordCap] = useState(80);
   const [loading, setLoading] = useState(false);
@@ -63,7 +64,7 @@ export default function Comparer({
         body: JSON.stringify({
           tool: toolName.trim(),
           useCase: useCase.trim(),
-          task: task.trim() || defaultTask,
+          task,
           models,
           criteria: { wordCap, bannedPhrases: ["as an AI"] },
         }),
@@ -117,10 +118,14 @@ export default function Comparer({
             id="task"
             value={task}
             onChange={(e) => setTask(e.target.value)}
-            placeholder={defaultTask}
+            placeholder="e.g. Write a cold email to a SaaS founder offering an AI video service. Keep it under 100 words."
             maxLength={600}
           />
-          <p className="hint">It runs on a short fictional support ticket, never your files.</p>
+          <p className="hint">
+            {task.trim()
+              ? "Sent exactly as written to every selected model."
+              : `Leave empty to run the demo: "${defaultTask}" on a short fictional support ticket.`}
+          </p>
           {support ? (
             support.supported ? (
               <p className="hint">{support.message}</p>
@@ -168,6 +173,7 @@ export default function Comparer({
               />
               <span className="chip">must not say &ldquo;as an AI&rdquo;</span>
             </div>
+            <p className="hint">Checked on every reply. Not added to your task, so set the cap your task asks for.</p>
           </div>
         </div>
 
@@ -200,6 +206,9 @@ export default function Comparer({
           </div>
 
           <p className="hint">
+            {result.mode === "demo"
+              ? `Demo run: no task was entered, so every model got "${result.task}" on the sample support ticket. `
+              : "Every model got your task exactly as written. "}
             {result.results.find((r) => r.isCurrent)
               ? `Verified mapping: ${result.currentTool} runs on ${result.results.find((r) => r.isCurrent)!.label}.`
               : `${result.currentTool} itself was not run. Realizah has no verified model or price for it, so these cards show what this task costs on each OpenAI model.`}

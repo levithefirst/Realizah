@@ -49,17 +49,43 @@ export function matchTool(input: string, registry: AiTool[]): AiTool | null {
   return best;
 }
 
-// Signals that the work produces something other than text.
-const TASK_SIGNALS: [Capability, RegExp][] = [
-  ["video", /\b(videos?|films?|movies?|clips?|reels?|animations?|animated|animate|footage|b roll|lip ?sync\w*)\b/],
-  ["image", /\b(images?|photos?|photographs?|pictures?|illustrations?|logos?|thumbnails?|artwork|drawings?|portraits?|headshots?|graphics?|posters?|memes?)\b/],
-  ["audio", /\b(audio|music|songs?|podcasts?|voice ?overs?|voice clon\w*|text to speech|tts|narration|dubbing|transcri\w*|sound effects?)\b/],
-  ["code", /\b(code|coding|programming|debug\w*|refactor\w*|python|javascript|typescript|sql|unit tests?|pull requests?)\b/],
+// Signals that the work *produces* something other than text. A media word
+// alone is not enough ("a cold email offering an AI video service" is text);
+// it must be the thing being made, edited or converted into.
+const MAKE = "(?:make|makes|making|made|create|creates|creating|generate|generates|generating|produce|produces|producing|render|rendering|edit|edits|editing|animate|animating|design|designing|draw|drawing|record|recording|compose|composing|shoot|shooting|film|filming|paint|painting|upscale|upscaling|turn\\w*\\s+\\w+(?:\\s+\\w+){0,3}\\s+into|convert\\w*\\s+\\w+(?:\\s+\\w+){0,3}\\s+(?:in)?to)";
+const FILL = "(?:\\s+\\w+){0,3}?";
+const NOT_A_BUSINESS = "(?!\\s+(?:service|services|company|agency|startup|tool|tools|platform|business|product|brand|app|studio|team)\\b)";
+
+function produces(nouns: string): RegExp {
+  return new RegExp(`\\b${MAKE}${FILL}\\s+(?:${nouns})\\b${NOT_A_BUSINESS}`);
+}
+function named(nouns: string): RegExp {
+  // "video editing", "image generation", "AI videos" as the work itself.
+  return new RegExp(
+    `\\b(?:(?:${nouns})\\s+(?:generation|generator|creation|editing|editor|production|design)|ai\\s+(?:${nouns}))\\b${NOT_A_BUSINESS}`
+  );
+}
+
+const VIDEO = "videos?|films?|movies?|clips?|reels?|animations?|footage|b roll|tiktoks?";
+const IMAGE = "images?|photos?|photographs?|pictures?|illustrations?|logos?|thumbnails?|artwork|art|drawings?|portraits?|headshots?|graphics?|posters?|memes?|banners?|icons?|avatars?";
+const AUDIO = "audio|music|songs?|podcasts?|beats?|jingles?|sound effects?|voices?";
+
+const TASK_SIGNALS: [Capability, RegExp[]][] = [
+  ["video", [produces(VIDEO), named(VIDEO), /\blip ?sync\w*\b/]],
+  ["image", [produces(IMAGE), named(IMAGE)]],
+  ["audio", [produces(AUDIO), named(AUDIO), /\b(?:transcri(?:be|bes|bed|bing|ption|ptions)|text to speech|tts|voice ?overs?|voice clon\w*|dubbing)\b/]],
+  [
+    "code",
+    [
+      /\b(?:coding|programming|debugging|refactoring|unit tests?|pull requests?)\b/,
+      /\b(?:write|writes|writing|generate|generating|create|creating|build|building|fix|fixing|review|reviewing|debug|refactor)(?:\s+\w+){0,3}?\s+(?:code|functions?|python|javascript|typescript|sql|html|css|regex|bash)\b/,
+    ],
+  ],
 ];
 
 export function detectTaskType(text: string): Capability | null {
   const t = norm(text);
-  for (const [cap, re] of TASK_SIGNALS) if (re.test(t)) return cap;
+  for (const [cap, patterns] of TASK_SIGNALS) if (patterns.some((re) => re.test(t))) return cap;
   return null;
 }
 

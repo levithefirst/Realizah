@@ -1,3 +1,5 @@
+// Demo fixture only. Used when the user submits no task of their own; a task
+// the user typed is always sent as written and never replaced by this.
 // A short, entirely fictional support ticket with an invoice attached.
 // Kept near 150 words so every comparison costs fractions of a cent.
 // No real customer data is ever sent to a model.
