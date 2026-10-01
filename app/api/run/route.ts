@@ -6,12 +6,20 @@ import { checkSupport } from "@/lib/support";
 import { normalizeCriteria } from "@/lib/checks";
 import { clientIp, hashIp, takeToken } from "@/lib/ratelimit";
 import { compare } from "@/lib/compare";
+import { selectModels, MIN_MODELS } from "@/lib/selectModels";
+import { DEFAULT_WORD_CAP, MAX_WORD_CAP, MIN_WORD_CAP, detectWordLimit, parseWordCap } from "@/lib/wordLimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const MAX_TASK_CHARS = 600;
+
+function configuredProviders(): Set<string> {
+  const providers = new Set<string>();
+  if (process.env.OPENAI_API_KEY) providers.add("openai");
+  return providers;
+}
 
 function bad(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
@@ -33,8 +41,16 @@ export async function POST(req: Request) {
   // Sent to every model exactly as typed. Empty means the demo fixture run;
   // a typed task is never trimmed, truncated or replaced.
   const task = typeof body.task === "string" ? body.task : "";
-  const modelSlugs = Array.isArray(body.models) ? [...new Set(body.models.map(String))] : [];
-  const criteria = normalizeCriteria(body.criteria);
+  // Word cap: the user's explicit value, else the limit the task states, else 80.
+  const rawCap = (body.criteria as Record<string, unknown> | undefined)?.wordCap;
+  const userCap = rawCap === undefined || rawCap === null || rawCap === "" ? null : parseWordCap(rawCap as string | number);
+  if (rawCap !== undefined && rawCap !== null && rawCap !== "" && userCap === null) {
+    return bad(`Word limit must be a whole number from ${MIN_WORD_CAP} to ${MAX_WORD_CAP}.`);
+  }
+  const criteria = normalizeCriteria({
+    ...(body.criteria as object),
+    wordCap: userCap ?? detectWordLimit(task) ?? DEFAULT_WORD_CAP,
+  });
   if (!toolName) return bad("Tell us which AI tool you use now.");
   if (!useCase) return bad("Tell us what you use it for.");
   if (task.length > MAX_TASK_CHARS) return bad(`Task is too long. Keep it under ${MAX_TASK_CHARS} characters.`);
@@ -46,18 +62,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: support.message, unsupported: true }, { status: 422 });
   }
 
+  // Models are chosen here, never by the browser: every enabled model whose
+  // provider we hold a key for. A verified mapping is the only way the
+  // user's tool gets its own card.
   const tools = await listTools();
   const bySlug = new Map(tools.map((t) => [t.slug, t]));
-  const models = modelSlugs
-    .map((s) => bySlug.get(s))
-    .filter((t): t is NonNullable<typeof t> => Boolean(t));
-  if (models.length < 2 || models.length > 3) {
-    return bad("Pick two or three models to run the task on.");
-  }
-  // A verified mapping is the only way the user's tool gets its own card.
   const verifiedModelSlug = support.tool?.verifiedModelSlug ?? null;
-  const verifiedModel = verifiedModelSlug ? bySlug.get(verifiedModelSlug) : undefined;
-  if (verifiedModel && !models.some((m) => m.slug === verifiedModel.slug)) models.push(verifiedModel);
+  const models = selectModels(tools, {
+    providers: configuredProviders(),
+    max: Number(process.env.MAX_MODELS_PER_RUN) || undefined,
+    verifiedModelSlug,
+  });
+  if (models.length < MIN_MODELS) {
+    return bad("Not enough models are available to compare right now. Try again later.", 503);
+  }
+  const verifiedModel = models.find((m) => m.slug === verifiedModelSlug);
 
   const ipHash = hashIp(clientIp(req.headers));
   const gate = await takeToken(ipHash);

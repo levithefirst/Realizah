@@ -4,6 +4,7 @@ import { buildMessages, runModels, ModelNotFoundError, type ChatFn, type ChatMes
 import { assignLabels } from "../lib/labels";
 import { DEFAULT_TASK, FIXTURE } from "../lib/fixture";
 import type { Tool } from "../lib/tools";
+import { selectModels, comparedAcross } from "../lib/selectModels";
 
 const model = (slug: string, input: number, output: number): Tool => ({
   slug,
@@ -15,6 +16,7 @@ const model = (slug: string, input: number, output: number): Tool => ({
   outputUsdPer1m: output,
   lastChecked: "2026-10-01T00:00:00.000Z",
   isUnknown: false,
+  enabled: true,
 });
 const MODELS = [model("gpt-4o-mini", 0.15, 0.6), model("gpt-4.1-mini", 0.4, 1.6), model("gpt-4.1-nano", 0.1, 0.4)];
 const CRITERIA = { wordCap: 100, bannedPhrases: ["as an AI"] };
@@ -122,4 +124,26 @@ test("a failed call is an error card with no cost", async () => {
   assert.equal(o.card.qualityBand, "error");
   assert.equal(o.card.estimatedCostUsd, null);
   assert.equal(o.audit, null);
+});
+
+test("auto-selected models of any count all get the exact same user task", async () => {
+  const providers = new Set(["openai"]);
+  for (const n of [2, 3, 5, 10]) {
+    const pool = Array.from({ length: n }, (_, i) => model(`model-${String(i).padStart(2, "0")}`, 0.1 + i, 0.4 + i));
+    const selected = selectModels(pool, { providers });
+    assert.equal(selected.length, n);
+
+    const { calls, call } = recorder();
+    const outcomes = await runModels(selected, buildMessages(TASK).messages, CRITERIA, {
+      fallback: undefined,
+      verifiedModelSlug: null,
+      call,
+    });
+    assert.equal(calls.length, n);
+    assert.equal(outcomes.length, n);
+    for (const c of calls) assert.deepEqual(c.messages, [{ role: "user", content: TASK }]);
+    assert.deepEqual(calls.map((c) => c.model).sort(), selected.map((m) => m.modelId).sort());
+    // The results heading counts the cards actually produced.
+    assert.equal(comparedAcross(outcomes.length), `Compared across ${n} models`);
+  }
 });

@@ -1,4 +1,3 @@
-import { listTools, type Tool } from "@/lib/tools";
 import { listAiTools } from "@/lib/aiTools";
 import type { AiTool } from "@/lib/support";
 import { hasDatabase } from "@/lib/db";
@@ -9,14 +8,13 @@ import Comparer from "@/components/Comparer";
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  let tools: Tool[] = [];
   let aiTools: AiTool[] = [];
   let loadError: string | null = null;
   if (!hasDatabase()) {
     loadError = "This deployment has no DATABASE_URL yet, so the tool list is empty.";
   } else {
     try {
-      [tools, aiTools] = await Promise.all([listTools(), listAiTools()]);
+      aiTools = await listAiTools();
     } catch {
       loadError = "Could not load the tool list from the database. Refresh to retry.";
     }
@@ -30,7 +28,7 @@ export default async function Home() {
         cost and the Better cost. No account needed for {freeLimit()} comparisons a day.
       </p>
       {loadError ? <div className="alert error">{loadError}</div> : null}
-      <Comparer tools={tools} aiTools={aiTools} defaultTask={DEFAULT_TASK} />
+      <Comparer aiTools={aiTools} defaultTask={DEFAULT_TASK} />
     </main>
   );
 }

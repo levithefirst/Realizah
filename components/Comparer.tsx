@@ -1,36 +1,26 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { Tool } from "@/lib/tools";
 import type { CompareResult, ResultCard } from "@/lib/compare";
 import { checkSupport, type AiTool } from "@/lib/support";
 import { formatUsd } from "@/lib/cost";
-
-function rate(t: Tool): string {
-  if (t.isUnknown) return "price UNKNOWN";
-  return `$${t.inputUsdPer1m} in / $${t.outputUsdPer1m} out per 1M`;
-}
+import { comparedAcross } from "@/lib/selectModels";
+import { MAX_WORD_CAP, MIN_WORD_CAP, resolveWordCap } from "@/lib/wordLimit";
 
 function asOf(iso: string | null): string {
   if (!iso) return "date unknown";
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-export default function Comparer({
-  tools,
-  aiTools,
-  defaultTask,
-}: {
-  tools: Tool[];
-  aiTools: AiTool[];
-  defaultTask: string;
-}) {
+export default function Comparer({ aiTools, defaultTask }: { aiTools: AiTool[]; defaultTask: string }) {
   const [toolName, setToolName] = useState("");
   const [useCase, setUseCase] = useState("");
   // Empty by default: an empty task runs the demo, anything typed is sent as is.
   const [task, setTask] = useState("");
-  const [models, setModels] = useState<string[]>(() => tools.slice(0, 3).map((t) => t.slug));
-  const [wordCap, setWordCap] = useState(80);
+  // Raw text so the field can be cleared and retyped freely. Until the user
+  // edits it, the cap follows the limit stated in the task (or 80).
+  const [capInput, setCapInput] = useState("");
+  const [capTouched, setCapTouched] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<(CompareResult & { remaining?: number }) | null>(null);
@@ -40,20 +30,11 @@ export default function Comparer({
     () => (ready ? checkSupport({ tool: toolName, useCase, task }, aiTools) : null),
     [ready, toolName, useCase, task, aiTools]
   );
-  const callCount = models.length;
-  const lastChecked = tools.map((t) => t.lastChecked).filter(Boolean).sort().at(-1) ?? null;
-
-  function toggleModel(slug: string) {
-    setModels((prev) => {
-      if (prev.includes(slug)) return prev.length > 2 ? prev.filter((m) => m !== slug) : prev;
-      if (prev.length >= 3) return prev;
-      return [...prev, slug];
-    });
-  }
+  const cap = resolveWordCap({ input: capInput, touched: capTouched, task });
 
   async function run(e: React.FormEvent) {
     e.preventDefault();
-    if (!support?.supported) return;
+    if (!support?.supported || cap.cap === null) return;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -65,8 +46,7 @@ export default function Comparer({
           tool: toolName.trim(),
           useCase: useCase.trim(),
           task,
-          models,
-          criteria: { wordCap, bannedPhrases: ["as an AI"] },
+          criteria: { wordCap: cap.cap, bannedPhrases: ["as an AI"] },
         }),
       });
       const data = await res.json().catch(() => null);
@@ -135,55 +115,63 @@ export default function Comparer({
           ) : null}
         </div>
 
-        <div className="grid2">
-          <div className="panel">
-            <span className="field">Models to run this task on (pick 2 or 3)</span>
-            <div className="opts">
-              {tools.map((t) => {
-                const checked = models.includes(t.slug);
-                const disabled = (!checked && models.length >= 3) || (checked && models.length <= 2);
-                return (
-                  <label key={t.slug} className="opt" aria-disabled={disabled}>
-                    <input type="checkbox" checked={checked} disabled={disabled} onChange={() => toggleModel(t.slug)} />
-                    <span>{t.name}</span>
-                    <span className="price">{rate(t)}</span>
-                  </label>
-                );
-              })}
-              {tools.length === 0 ? <p className="hint">No models seeded yet.</p> : null}
-            </div>
+        <div className="panel">
+          <label className="field" htmlFor="cap">Success checks</label>
+          <div className="chips">
+            <span>Word limit</span>
+            <input
+              id="cap"
+              type="number"
+              inputMode="numeric"
+              min={MIN_WORD_CAP}
+              max={MAX_WORD_CAP}
+              step={1}
+              value={capTouched ? capInput : String(cap.cap ?? "")}
+              onChange={(e) => {
+                setCapTouched(true);
+                setCapInput(e.target.value);
+              }}
+              style={{ width: 90 }}
+            />
+            <span className="chip">must not say &ldquo;as an AI&rdquo;</span>
+          </div>
+          {cap.error ? (
+            <p className="hint" role="alert" style={{ color: "var(--fail)" }}>{cap.error}</p>
+          ) : (
             <p className="hint">
-              OpenAI API models used to price this task. None of them is assumed to be the model behind your tool.
-              Prices from <a href="https://openai.com/api/pricing/" target="_blank" rel="noreferrer">OpenAI pricing</a>, as of {asOf(lastChecked)}. Missing prices show UNKNOWN.
+              {cap.source === "task"
+                ? `${cap.cap}-word limit detected from your task.`
+                : cap.source === "user" && cap.detected !== null && cap.detected !== cap.cap
+                  ? `Your task says ${cap.detected} words; checking against your ${cap.cap}.`
+                  : cap.source === "user"
+                    ? `Checking replies against your ${cap.cap}-word limit.`
+                    : `No word limit in your task, so replies are checked against ${cap.cap} words. Change it if you need to.`}
+              {capTouched ? (
+                <>
+                  {" "}
+                  <a
+                    href="#cap"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setCapTouched(false);
+                      setCapInput("");
+                    }}
+                  >
+                    Reset
+                  </a>
+                </>
+              ) : null}
             </p>
-          </div>
-
-          <div className="panel">
-            <label className="field" htmlFor="cap">Success checks</label>
-            <div className="chips">
-              <span>Word cap</span>
-              <input
-                id="cap"
-                type="number"
-                min={10}
-                max={300}
-                value={wordCap}
-                onChange={(e) => setWordCap(Number(e.target.value) || 80)}
-                style={{ width: 90 }}
-              />
-              <span className="chip">must not say &ldquo;as an AI&rdquo;</span>
-            </div>
-            <p className="hint">Checked on every reply. Not added to your task, so set the cap your task asks for.</p>
-          </div>
+          )}
         </div>
 
         <div className="actions">
           <button
             className="primary"
             type="submit"
-            disabled={loading || !tools.length || callCount < 2 || !ready || !support?.supported}
+            disabled={loading || !ready || !support?.supported || cap.cap === null}
           >
-            {loading ? (<><span className="spinner" aria-hidden />Running {callCount} calls</>) : `Run ${callCount} real calls`}
+            {loading ? (<><span className="spinner" aria-hidden />Comparing</>) : "Compare"}
           </button>
           <span className="hint" style={{ margin: 0 }}>
             {ready ? "Max 400 output tokens and 25s per model. Usually under 10 seconds." : "Fill in your tool and what you use it for."}
@@ -192,12 +180,12 @@ export default function Comparer({
       </form>
 
       {error ? <div className="alert error" role="alert">{error}</div> : null}
-      {loading ? <div className="alert info" aria-live="polite">Calling each model with the same fixture and checking the answers.</div> : null}
+      {loading ? <div className="alert info" aria-live="polite">Sending your task to each model and checking the answers.</div> : null}
 
       {result ? (
         <section aria-live="polite">
           <div className={`verdict ${result.betterCostSlugs.length ? "" : "none"}`}>
-            <strong>Cost labels for this run</strong>
+            <strong>{comparedAcross(result.results.length)}</strong>
             {result.summary}
             <div className="hint">
               Cheaper cost is the lowest sticker cost, pass or fail. Better cost is the lowest dollars per successful

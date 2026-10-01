@@ -39,15 +39,19 @@ outcome on their own task before renewing.
    Realizah never assumes which model is behind a tool. `ai_tools.verified_model_slug` stays null unless an
    explicit, sourced mapping is stored (a constraint requires a source URL and a verified date). Today no
    mappings are stored, so the user's tool is never one of the cards.
-   You pick 2 or 3 OpenAI models to price the task on. They are labeled as pricing models, not as "the model
-   behind your tool".
+   Models are chosen on the server, never by the user: every `tools_seed` row with `enabled = true` whose
+   provider has a key configured (today OpenAI), up to `MAX_MODELS_PER_RUN` (default 10). Adding a model or
+   provider is a database row (plus a client for a new provider), with no UI change. The results say
+   "Compared across N models" and each card names its model.
 3. The server sends your "Task to compare" to every selected model in parallel, exactly as typed: the same
    single user message for each model, with no wrapper, no added instructions and no fixture. The word cap
    and banned-phrase checks are applied to the replies, not added to the prompt. Max 600 characters in,
    400 output tokens, 25 second timeout per model. Only if you leave the task empty does Realizah run a demo:
    summarizing a ~150 word fictional support ticket. A typed task is never replaced by the demo.
    `lib/engine.ts` builds the prompt and `tests/engine.test.ts` proves every model gets it unchanged.
-4. Each answer is checked: word cap (default 80) and must not contain "as an AI".
+4. Each answer is checked: word limit and must not contain "as an AI". The word limit is read from the task
+   ("Keep it under 100 words" gives 100); with no limit stated it is 80. The user can override it with any
+   whole number from 1 to 10,000.
 5. Estimated cost = `(tokens_in * input_rate + tokens_out * output_rate) / 1,000,000` from `tools_seed`.
 6. `cost_per_success_usd` = estimated cost if the answer passed, otherwise null. Failed answers are never
    "cheap".
@@ -85,7 +89,7 @@ Browser ──> Vercel (Next.js App Router)
 
 | Line | Number |
 | --- | --- |
-| Model spend per comparison | 2-3 calls x ~350 tokens in, <=400 out. At seeded rates this is well under $0.001. The `/pricing` page shows the measured average from `audit_events`. |
+| Model spend per comparison | One call per enabled model (3 today) x the task tokens in, <=400 out. At seeded rates this is well under $0.001. The `/pricing` page shows the measured average from `audit_events`. |
 | Free tier | 3 comparisons per day per hashed IP, so worst case per heavy free user is a few cents per month. |
 | Pro, $19/mo | 30/day cap, history, CSV. Even at the cap every day, model spend is under $1. Margin above 95%. |
 | Team API, usage-based | Model cost passed through at the published rate plus a platform fee, so usage never runs at a loss. |
@@ -115,7 +119,7 @@ See [`db/schema.sql`](db/schema.sql), [`db/seed.sql`](db/seed.sql) and [`db/seed
 
 | Table | Purpose |
 | --- | --- |
-| `tools_seed` | Model slug, provider, model id, per-1M token prices, pricing URL, `last_checked`, `is_unknown` |
+| `tools_seed` | Model slug, provider, model id, per-1M token prices, pricing URL, `last_checked`, `is_unknown`, `enabled` (in the automatic comparison pool) |
 | `ai_tools` | Tool registry: name, aliases, `capability` (text, code, image, video, audio), optional `verified_model_slug` with required source URL and date |
 | `runs` | One comparison: current tool text, `use_case`, task, success criteria, `recommended_slug` (the Better cost slug), hashed IP |
 | `run_results` | One row per model: passed, quality band, estimated cost, cost per success, latency, error |
@@ -148,13 +152,14 @@ npm run build && npm start  # production build
 | `DATABASE_URL` | yes | Neon pooled connection string. `sslmode=require` is appended if missing. |
 | `OPENAI_API_KEY` | yes | Server only. Never exposed to the client bundle. |
 | `FREE_COMPARISONS_PER_DAY` | no | Defaults to 3. |
+| `MAX_MODELS_PER_RUN` | no | Safety cap on models per comparison. Defaults to 10. |
 | `APP_URL` | no | Public URL of the deployment. |
 | `IP_HASH_SALT` | no | Salt for the IP hash. Defaults to a fixed value. |
 
 ## Routes
 
 - `/` comparison page
-- `POST /api/run` body `{ tool, useCase, task, models[], criteria: { wordCap } }`. Unsupported tool or task returns 422 before any model call or rate-limit use.
+- `POST /api/run` body `{ tool, useCase, task, criteria?: { wordCap } }`. Models are picked server-side; `wordCap` defaults to the limit stated in the task, else 80. Unsupported tool or task returns 422 before any model call or rate-limit use.
 - `GET /api/tools`
 - `/health` returns `{ "ok": true }`
 - `/pricing`, `/privacy`, `/terms`

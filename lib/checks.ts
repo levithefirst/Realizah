@@ -1,10 +1,12 @@
+import { DEFAULT_WORD_CAP, MAX_WORD_CAP, MIN_WORD_CAP } from "./wordLimit";
+
 export type Criteria = {
   wordCap: number;
   bannedPhrases: string[];
 };
 
 export const DEFAULT_CRITERIA: Criteria = {
-  wordCap: 80,
+  wordCap: DEFAULT_WORD_CAP,
   bannedPhrases: ["as an AI"],
 };
 
@@ -35,7 +37,7 @@ export function normalizeCriteria(input: unknown): Criteria {
   const o = (input ?? {}) as Record<string, unknown>;
   let wordCap = Math.round(Number(o.wordCap));
   if (!Number.isFinite(wordCap)) wordCap = DEFAULT_CRITERIA.wordCap;
-  wordCap = Math.min(300, Math.max(10, wordCap));
+  wordCap = Math.min(MAX_WORD_CAP, Math.max(MIN_WORD_CAP, wordCap));
   let banned = DEFAULT_CRITERIA.bannedPhrases;
   if (Array.isArray(o.bannedPhrases)) {
     banned = o.bannedPhrases

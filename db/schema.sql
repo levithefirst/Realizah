@@ -14,6 +14,9 @@ create table if not exists tools_seed (
   created_at timestamptz not null default now()
 );
 
+-- enabled: whether the model is in the automatic comparison pool.
+alter table tools_seed add column if not exists enabled boolean not null default true;
+
 create table if not exists runs (
   id uuid primary key default gen_random_uuid(),
   current_tool text not null,

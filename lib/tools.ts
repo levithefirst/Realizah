@@ -10,6 +10,8 @@ export type Tool = {
   outputUsdPer1m: number | null;
   lastChecked: string | null;
   isUnknown: boolean;
+  // In the automatic comparison pool.
+  enabled: boolean;
 };
 
 type Row = {
@@ -22,6 +24,7 @@ type Row = {
   output_usd_per_1m: string | null;
   last_checked: Date | null;
   is_unknown: boolean;
+  enabled: boolean;
 };
 
 function num(v: string | null): number | null {
@@ -33,7 +36,7 @@ function num(v: string | null): number | null {
 export async function listTools(): Promise<Tool[]> {
   const { rows } = await db().query<Row>(
     `select slug, name, provider, model_id, pricing_url, input_usd_per_1m,
-            output_usd_per_1m, last_checked, is_unknown
+            output_usd_per_1m, last_checked, is_unknown, enabled
        from tools_seed
       order by name`
   );
@@ -50,6 +53,7 @@ export async function listTools(): Promise<Tool[]> {
       outputUsdPer1m: r.is_unknown ? null : output,
       lastChecked: r.last_checked ? r.last_checked.toISOString() : null,
       isUnknown: r.is_unknown || input === null || output === null,
+      enabled: r.enabled,
     };
   });
 }
