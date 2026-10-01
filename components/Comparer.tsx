@@ -26,8 +26,9 @@ function monthly(v: number | null): string {
 
 export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaultTask: string }) {
   const [statement, setStatement] = useState("");
-  const [current, setCurrent] = useState(tools[0]?.slug ?? "");
-  const [alts, setAlts] = useState<string[]>(() => tools.filter((t) => t.slug !== tools[0]?.slug).slice(0, 2).map((t) => t.slug));
+  const initial = (tools.find((t) => t.slug === "gpt-4o-mini") ?? tools[0])?.slug ?? "";
+  const [current, setCurrent] = useState(initial);
+  const [alts, setAlts] = useState<string[]>(() => tools.filter((t) => t.slug !== initial).slice(0, 2).map((t) => t.slug));
   const [wordCap, setWordCap] = useState(80);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -1,7 +1,8 @@
 # Realizah
 
-**Live:** LIVE_URL_PLACEHOLDER
-**Health:** LIVE_URL_PLACEHOLDER/health
+**Live:** https://realizah.vercel.app  
+**Mirror:** https://realizah-production.up.railway.app  
+**Health:** https://realizah.vercel.app/health
 
 You already pay for an AI tool. Realizah tells you what you pay for each answer that actually works.
 Type "I use X for Y", pick up to two alternatives, and hit run. Realizah makes real model calls on a
