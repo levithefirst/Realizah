@@ -1,4 +1,6 @@
 import { listTools, type Tool } from "@/lib/tools";
+import { listAiTools } from "@/lib/aiTools";
+import type { AiTool } from "@/lib/support";
 import { hasDatabase } from "@/lib/db";
 import { DEFAULT_TASK } from "@/lib/fixture";
 import { freeLimit } from "@/lib/ratelimit";
@@ -8,12 +10,13 @@ export const dynamic = "force-dynamic";
 
 export default async function Home() {
   let tools: Tool[] = [];
+  let aiTools: AiTool[] = [];
   let loadError: string | null = null;
   if (!hasDatabase()) {
     loadError = "This deployment has no DATABASE_URL yet, so the tool list is empty.";
   } else {
     try {
-      tools = await listTools();
+      [tools, aiTools] = await Promise.all([listTools(), listAiTools()]);
     } catch {
       loadError = "Could not load the tool list from the database. Refresh to retry.";
     }
@@ -22,12 +25,12 @@ export default async function Home() {
   return (
     <main>
       <p className="lede">
-        Tell us which AI tool you already pay for and what you use it for. We run your task on it and
-        on up to two alternatives, check each answer, and show what you pay per answer that actually
-        passed. No account needed for {freeLimit()} comparisons a day.
+        Tell us which AI tool you pay for, what you use it for, and the task to compare. For
+        text-generation tasks we run the task on OpenAI models, check each answer, and mark the Cheaper
+        cost and the Better cost. No account needed for {freeLimit()} comparisons a day.
       </p>
       {loadError ? <div className="alert error">{loadError}</div> : null}
-      <Comparer tools={tools} defaultTask={DEFAULT_TASK} />
+      <Comparer tools={tools} aiTools={aiTools} defaultTask={DEFAULT_TASK} />
     </main>
   );
 }

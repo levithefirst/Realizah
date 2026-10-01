@@ -3,11 +3,8 @@
 import { useMemo, useState } from "react";
 import type { Tool } from "@/lib/tools";
 import type { CompareResult, ResultCard } from "@/lib/compare";
-import { parseStatement } from "@/lib/parse";
+import { checkSupport, type AiTool } from "@/lib/support";
 import { formatUsd } from "@/lib/cost";
-
-const PLACEHOLDER =
-  "I use ChatGPT for summarizing a short brief in 80 words or fewer with no invented facts";
 
 function rate(t: Tool): string {
   if (t.isUnknown) return "price UNKNOWN";
@@ -19,43 +16,43 @@ function asOf(iso: string | null): string {
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaultTask: string }) {
-  const [statement, setStatement] = useState("");
-  const initial = (tools.find((t) => t.slug === "gpt-4o-mini") ?? tools[0])?.slug ?? "";
-  const [current, setCurrent] = useState(initial);
-  const [alts, setAlts] = useState<string[]>(() => tools.filter((t) => t.slug !== initial).slice(0, 2).map((t) => t.slug));
+export default function Comparer({
+  tools,
+  aiTools,
+  defaultTask,
+}: {
+  tools: Tool[];
+  aiTools: AiTool[];
+  defaultTask: string;
+}) {
+  const [toolName, setToolName] = useState("");
+  const [useCase, setUseCase] = useState("");
+  const [task, setTask] = useState(defaultTask);
+  const [models, setModels] = useState<string[]>(() => tools.slice(0, 3).map((t) => t.slug));
   const [wordCap, setWordCap] = useState(80);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<(CompareResult & { remaining?: number }) | null>(null);
 
-  const parsed = useMemo(() => parseStatement(statement || PLACEHOLDER), [statement]);
-  const altChoices = tools.filter((t) => t.slug !== current);
-  const callCount = 1 + alts.filter((a) => a !== current).length;
+  const ready = toolName.trim() !== "" && useCase.trim() !== "";
+  const support = useMemo(
+    () => (ready ? checkSupport({ tool: toolName, useCase, task }, aiTools) : null),
+    [ready, toolName, useCase, task, aiTools]
+  );
+  const callCount = models.length;
   const lastChecked = tools.map((t) => t.lastChecked).filter(Boolean).sort().at(-1) ?? null;
 
-  function onCurrent(slug: string) {
-    setCurrent(slug);
-    setAlts((prev) => {
-      const kept = prev.filter((a) => a !== slug);
-      if (kept.length === 0) {
-        const first = tools.find((t) => t.slug !== slug);
-        return first ? [first.slug] : [];
-      }
-      return kept;
-    });
-  }
-
-  function toggleAlt(slug: string) {
-    setAlts((prev) => {
-      if (prev.includes(slug)) return prev.length > 1 ? prev.filter((a) => a !== slug) : prev;
-      if (prev.length >= 2) return prev;
+  function toggleModel(slug: string) {
+    setModels((prev) => {
+      if (prev.includes(slug)) return prev.length > 2 ? prev.filter((m) => m !== slug) : prev;
+      if (prev.length >= 3) return prev;
       return [...prev, slug];
     });
   }
 
   async function run(e: React.FormEvent) {
     e.preventDefault();
+    if (!support?.supported) return;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -64,9 +61,10 @@ export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaul
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          statement: statement.trim() || PLACEHOLDER,
-          current,
-          alternatives: alts.filter((a) => a !== current),
+          tool: toolName.trim(),
+          useCase: useCase.trim(),
+          task: task.trim() || defaultTask,
+          models,
           criteria: { wordCap, bannedPhrases: ["as an AI"] },
         }),
       });
@@ -87,36 +85,76 @@ export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaul
     <>
       <form onSubmit={run}>
         <div className="panel">
-          <label className="field" htmlFor="statement">I use [tool] for [task]</label>
+          <label className="field" htmlFor="tool">AI tool you use now</label>
+          <input
+            id="tool"
+            type="text"
+            list="known-tools"
+            value={toolName}
+            onChange={(e) => setToolName(e.target.value)}
+            placeholder="e.g. ChatGPT, Claude, Jasper"
+            maxLength={80}
+            autoComplete="off"
+          />
+          <datalist id="known-tools">
+            {aiTools.map((t) => (
+              <option key={t.slug} value={t.name} />
+            ))}
+          </datalist>
+
+          <label className="field" style={{ marginTop: 14 }} htmlFor="use">What you use it for</label>
+          <input
+            id="use"
+            type="text"
+            value={useCase}
+            onChange={(e) => setUseCase(e.target.value)}
+            placeholder="e.g. summarizing customer support tickets"
+            maxLength={200}
+          />
+
+          <label className="field" style={{ marginTop: 14 }} htmlFor="task">Task to compare</label>
           <textarea
-            id="statement"
-            value={statement}
-            onChange={(e) => setStatement(e.target.value)}
-            placeholder={PLACEHOLDER}
+            id="task"
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            placeholder={defaultTask}
             maxLength={600}
           />
-          <p className="hint">
-            Read as: tool <strong>{parsed.tool || "(not stated)"}</strong>, task{" "}
-            <strong>{parsed.task || defaultTask}</strong>. It runs on a short fictional support ticket, never
-            your files.
-          </p>
+          <p className="hint">It runs on a short fictional support ticket, never your files.</p>
+          {support ? (
+            support.supported ? (
+              <p className="hint">{support.message}</p>
+            ) : (
+              <div className="alert error" role="alert">{support.message}</div>
+            )
+          ) : null}
         </div>
 
         <div className="grid2">
           <div className="panel">
-            <label className="field" htmlFor="current">Model behind your current tool</label>
-            <select id="current" value={current} onChange={(e) => onCurrent(e.target.value)} disabled={!tools.length}>
-              {tools.map((t) => (
-                <option key={t.slug} value={t.slug}>
-                  {t.name} ({rate(t)})
-                </option>
-              ))}
-            </select>
+            <span className="field">Models to run this task on (pick 2 or 3)</span>
+            <div className="opts">
+              {tools.map((t) => {
+                const checked = models.includes(t.slug);
+                const disabled = (!checked && models.length >= 3) || (checked && models.length <= 2);
+                return (
+                  <label key={t.slug} className="opt" aria-disabled={disabled}>
+                    <input type="checkbox" checked={checked} disabled={disabled} onChange={() => toggleModel(t.slug)} />
+                    <span>{t.name}</span>
+                    <span className="price">{rate(t)}</span>
+                  </label>
+                );
+              })}
+              {tools.length === 0 ? <p className="hint">No models seeded yet.</p> : null}
+            </div>
             <p className="hint">
+              OpenAI API models used to price this task. None of them is assumed to be the model behind your tool.
               Prices from <a href="https://openai.com/api/pricing/" target="_blank" rel="noreferrer">OpenAI pricing</a>, as of {asOf(lastChecked)}. Missing prices show UNKNOWN.
             </p>
+          </div>
 
-            <label className="field" style={{ marginTop: 14 }} htmlFor="cap">Success checks</label>
+          <div className="panel">
+            <label className="field" htmlFor="cap">Success checks</label>
             <div className="chips">
               <span>Word cap</span>
               <input
@@ -131,32 +169,18 @@ export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaul
               <span className="chip">must not say &ldquo;as an AI&rdquo;</span>
             </div>
           </div>
-
-          <div className="panel">
-            <span className="field">Alternatives to try (pick up to 2)</span>
-            <div className="opts">
-              {altChoices.map((t) => {
-                const checked = alts.includes(t.slug);
-                const disabled = !checked && alts.filter((a) => a !== current).length >= 2;
-                return (
-                  <label key={t.slug} className="opt" aria-disabled={disabled}>
-                    <input type="checkbox" checked={checked} disabled={disabled} onChange={() => toggleAlt(t.slug)} />
-                    <span>{t.name}</span>
-                    <span className="price">{rate(t)}</span>
-                  </label>
-                );
-              })}
-              {altChoices.length === 0 ? <p className="hint">No alternatives seeded yet.</p> : null}
-            </div>
-          </div>
         </div>
 
         <div className="actions">
-          <button className="primary" type="submit" disabled={loading || !tools.length || callCount < 2}>
+          <button
+            className="primary"
+            type="submit"
+            disabled={loading || !tools.length || callCount < 2 || !ready || !support?.supported}
+          >
             {loading ? (<><span className="spinner" aria-hidden />Running {callCount} calls</>) : `Run ${callCount} real calls`}
           </button>
           <span className="hint" style={{ margin: 0 }}>
-            Max 400 output tokens and 25s per model. Usually under 10 seconds.
+            {ready ? "Max 400 output tokens and 25s per model. Usually under 10 seconds." : "Fill in your tool and what you use it for."}
           </span>
         </div>
       </form>
@@ -174,6 +198,12 @@ export default function Comparer({ tools, defaultTask }: { tools: Tool[]; defaul
               outcome, and a fail never gets it. Neither label judges which answer reads best.
             </div>
           </div>
+
+          <p className="hint">
+            {result.results.find((r) => r.isCurrent)
+              ? `Verified mapping: ${result.currentTool} runs on ${result.results.find((r) => r.isCurrent)!.label}.`
+              : `${result.currentTool} itself was not run. Realizah has no verified model or price for it, so these cards show what this task costs on each OpenAI model.`}
+          </p>
 
           <div className="cards">
             {result.results.map((r) => (
@@ -217,7 +247,6 @@ function Card({ r }: { r: ResultCard }) {
       <div className="chips">
         {r.cheaperCost ? <span className="chip rec">Cheaper cost</span> : null}
         {r.betterCost ? <span className="chip rec">Better cost</span> : null}
-        {r.isCurrent ? <span className="chip cur">Current</span> : null}
         {r.qualityBand === "good" ? <span className="chip ok">PASS</span> : <span className="chip bad">{r.qualityBand === "error" ? "ERROR" : "FAIL"}</span>}
       </div>
       <div>

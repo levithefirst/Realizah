@@ -15,6 +15,7 @@ export type ResultCard = {
   slug: string;
   label: string;
   modelId: string;
+  // True only when this model is the verified model behind the user's tool.
   isCurrent: boolean;
   fallbackFor: string | null;
   passed: boolean | null;
@@ -49,6 +50,7 @@ export type CompareResult = {
   runId: string;
   createdAt: string;
   currentTool: string;
+  useCase: string;
   task: string;
   criteria: Criteria;
   results: ResultCard[];
@@ -182,20 +184,22 @@ async function runOne(
 }
 
 export async function compare(opts: {
-  currentTool: string;
+  toolName: string;
+  useCase: string;
   task: string;
   criteria: Criteria;
-  current: Tool;
-  alternatives: Tool[];
+  // OpenAI models the task is priced on. None of them is assumed to be the
+  // model behind the user's tool.
+  models: Tool[];
+  // Only set when ai_tools holds a verified mapping for the user's tool.
+  verifiedModelSlug: string | null;
   fallback: Tool | undefined;
   ipHash: string;
 }): Promise<CompareResult> {
-  const selected = [
-    { tool: opts.current, isCurrent: true },
-    ...opts.alternatives.map((tool) => ({ tool, isCurrent: false })),
-  ];
   const outcomes = await Promise.all(
-    selected.map((s) => runOne(s.tool, opts.fallback, opts.task, opts.criteria, s.isCurrent))
+    opts.models.map((m) =>
+      runOne(m, opts.fallback, opts.task, opts.criteria, m.slug === opts.verifiedModelSlug)
+    )
   );
   const cards = outcomes.map((o) => o.card);
   const labels = assignLabels(cards);
@@ -208,9 +212,9 @@ export async function compare(opts: {
     await client.query("begin");
     // recommended_slug holds the Better cost slug (lowest $ per success), or null.
     const run = await client.query<{ id: string; created_at: Date }>(
-      `insert into runs (current_tool, task_text, success_criteria, recommended_slug, ip_hash)
-       values ($1, $2, $3, $4, $5) returning id, created_at`,
-      [opts.currentTool, opts.task, JSON.stringify(opts.criteria), labels.better[0] ?? null, opts.ipHash]
+      `insert into runs (current_tool, use_case, task_text, success_criteria, recommended_slug, ip_hash)
+       values ($1, $2, $3, $4, $5, $6) returning id, created_at`,
+      [opts.toolName, opts.useCase, opts.task, JSON.stringify(opts.criteria), labels.better[0] ?? null, opts.ipHash]
     );
     runId = run.rows[0].id;
     createdAt = run.rows[0].created_at.toISOString();
@@ -251,7 +255,8 @@ export async function compare(opts: {
   return {
     runId,
     createdAt,
-    currentTool: opts.currentTool,
+    currentTool: opts.toolName,
+    useCase: opts.useCase,
     task: opts.task,
     criteria: opts.criteria,
     results: cards,

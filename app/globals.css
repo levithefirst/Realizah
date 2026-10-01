@@ -74,7 +74,7 @@ header.top nav a:hover { color: var(--text); }
 .panel + .panel { margin-top: 16px; }
 label.field { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
 .hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
-textarea, input[type="number"], select {
+textarea, input[type="text"], input[type="number"], select {
   width: 100%;
   font: inherit;
   color: var(--text);

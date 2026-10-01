@@ -56,3 +56,25 @@ create table if not exists rate_limits (
 
 create index if not exists run_results_run_id_idx on run_results (run_id);
 create index if not exists audit_events_run_id_idx on audit_events (run_id);
+
+-- Registry of AI tools users say they pay for. capability is the kind of
+-- output the tool produces; only 'text' comparisons are supported in v1.
+-- verified_model_slug stays null unless we have an explicit, sourced mapping
+-- from the tool to a priced model. Never infer it.
+create table if not exists ai_tools (
+  id uuid primary key default gen_random_uuid(),
+  slug text unique not null,
+  name text not null,
+  aliases text[] not null default '{}',
+  capability text not null check (capability in ('text', 'code', 'image', 'video', 'audio')),
+  verified_model_slug text references tools_seed(slug),
+  mapping_source_url text,
+  mapping_verified_at timestamptz,
+  created_at timestamptz not null default now(),
+  constraint ai_tools_mapping_is_sourced check (
+    verified_model_slug is null
+    or (mapping_source_url is not null and mapping_verified_at is not null)
+  )
+);
+
+alter table runs add column if not exists use_case text;

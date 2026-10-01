@@ -7,7 +7,7 @@ export default function Privacy() {
       <p>Realizah keeps the minimum it needs to run a comparison and show you the result.</p>
       <h2>What we store</h2>
       <ul>
-        <li>The task text you type and the tool name you mention.</li>
+        <li>The tool name you enter, what you use it for, and the task text you type.</li>
         <li>The model ids you picked and your success checks (word cap, banned phrases).</li>
         <li>Per call: token counts, estimated cost, latency, pass or fail.</li>
         <li>A one-way SHA-256 hash of your IP address, used only to enforce the free daily limit. We never store the raw IP.</li>

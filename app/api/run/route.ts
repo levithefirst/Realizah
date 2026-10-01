@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { hasDatabase } from "@/lib/db";
 import { listTools } from "@/lib/tools";
+import { listAiTools } from "@/lib/aiTools";
+import { checkSupport } from "@/lib/support";
 import { normalizeCriteria } from "@/lib/checks";
 import { DEFAULT_TASK } from "@/lib/fixture";
 import { clientIp, hashIp, takeToken } from "@/lib/ratelimit";
 import { compare } from "@/lib/compare";
-import { parseStatement } from "@/lib/parse";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,26 +27,33 @@ export async function POST(req: Request) {
     return bad("Request body must be JSON.");
   }
 
-  const statement = String(body.statement ?? "").slice(0, 600).trim();
-  const parsed = parseStatement(statement);
-  const task = parsed.task || DEFAULT_TASK;
-  const currentSlug = String(body.current ?? "");
-  const altSlugs = Array.isArray(body.alternatives)
-    ? body.alternatives.map(String)
-    : [];
+  const toolName = String(body.tool ?? "").slice(0, 80).trim();
+  const useCase = String(body.useCase ?? "").slice(0, 200).trim();
+  const task = String(body.task ?? "").slice(0, 600).trim() || DEFAULT_TASK;
+  const modelSlugs = Array.isArray(body.models) ? [...new Set(body.models.map(String))] : [];
   const criteria = normalizeCriteria(body.criteria);
+  if (!toolName) return bad("Tell us which AI tool you use now.");
+  if (!useCase) return bad("Tell us what you use it for.");
+
+  // Decide support before spending a free run or any model call.
+  const registry = await listAiTools();
+  const support = checkSupport({ tool: toolName, useCase, task }, registry);
+  if (!support.supported) {
+    return NextResponse.json({ error: support.message, unsupported: true }, { status: 422 });
+  }
 
   const tools = await listTools();
   const bySlug = new Map(tools.map((t) => [t.slug, t]));
-  const current = bySlug.get(currentSlug);
-  if (!current) return bad("Pick your current tool from the list.");
-  const alternatives = [...new Set(altSlugs)]
-    .filter((s) => s !== currentSlug)
+  const models = modelSlugs
     .map((s) => bySlug.get(s))
     .filter((t): t is NonNullable<typeof t> => Boolean(t));
-  if (alternatives.length < 1 || alternatives.length > 2) {
-    return bad("Pick one or two alternatives that differ from your current tool.");
+  if (models.length < 2 || models.length > 3) {
+    return bad("Pick two or three models to run the task on.");
   }
+  // A verified mapping is the only way the user's tool gets its own card.
+  const verifiedModelSlug = support.tool?.verifiedModelSlug ?? null;
+  const verifiedModel = verifiedModelSlug ? bySlug.get(verifiedModelSlug) : undefined;
+  if (verifiedModel && !models.some((m) => m.slug === verifiedModel.slug)) models.push(verifiedModel);
 
   const ipHash = hashIp(clientIp(req.headers));
   const gate = await takeToken(ipHash);
@@ -60,11 +68,12 @@ export async function POST(req: Request) {
 
   try {
     const result = await compare({
-      currentTool: parsed.tool || current.name,
+      toolName: support.tool?.name ?? toolName,
+      useCase,
       task,
       criteria,
-      current,
-      alternatives,
+      models,
+      verifiedModelSlug: verifiedModel ? verifiedModel.slug : null,
       fallback: bySlug.get("gpt-4o-mini"),
       ipHash,
     });

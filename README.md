@@ -5,8 +5,9 @@
 **Health:** https://realizah.vercel.app/health
 
 You already pay for an AI tool. Realizah tells you what you pay for each answer that actually works.
-Type "I use X for Y", pick up to two alternatives, and hit run. Realizah makes real model calls on a
-short fixture, checks each answer, and labels the results with two cost labels: Cheaper cost and Better cost.
+Enter the AI tool you use, what you use it for, and the task to compare. For text-generation tasks,
+Realizah makes real model calls on a short fixture, checks each answer, and labels the results with two
+cost labels: Cheaper cost and Better cost. Other kinds of tools and tasks get a clear "not supported yet".
 No login for the first result.
 
 Original work for Galuxium Nexus V2. All IP retained by the author.
@@ -27,9 +28,19 @@ outcome on their own task before renewing.
 
 ## How it works
 
-1. You type `I use [tool] for [task]`. The default task: summarize a short brief in 80 words or fewer with no
-   invented facts.
-2. You pick the model behind your current tool and up to two alternatives from the seeded list.
+1. You enter three things: the AI tool you use now, what you use it for, and the task to compare. The
+   default task: summarize a short brief in 80 words or fewer with no invented facts.
+2. Realizah checks support before spending anything. A tool's **capability** (`text`, `code`, `image`,
+   `video`, `audio`) comes from the `ai_tools` registry. Wording in the use case or task that points to
+   video, image, audio or code also counts. v1 supports `text` only. Anything else gets: "We can't run this
+   comparison yet. Realizah currently supports text-generation tasks." and no model call is made. Example:
+   "Higgsfield, making AI videos" is refused, never mapped to a text model. An unknown tool is judged by its
+   task.
+   Realizah never assumes which model is behind a tool. `ai_tools.verified_model_slug` stays null unless an
+   explicit, sourced mapping is stored (a constraint requires a source URL and a verified date). Today no
+   mappings are stored, so the user's tool is never one of the cards.
+   You pick 2 or 3 OpenAI models to price the task on. They are labeled as pricing models, not as "the model
+   behind your tool".
 3. The server runs your task on a ~150 word fictional support ticket (never your files) for each model in
    parallel. Max 400 output tokens, 25 second timeout per model.
 4. Each answer is checked: word cap (default 80) and must not contain "as an AI".
@@ -96,12 +107,13 @@ null with `is_unknown = true` and shown as UNKNOWN.
 
 ## Schema
 
-See [`db/schema.sql`](db/schema.sql) and [`db/seed.sql`](db/seed.sql).
+See [`db/schema.sql`](db/schema.sql), [`db/seed.sql`](db/seed.sql) and [`db/seed_ai_tools.sql`](db/seed_ai_tools.sql).
 
 | Table | Purpose |
 | --- | --- |
 | `tools_seed` | Model slug, provider, model id, per-1M token prices, pricing URL, `last_checked`, `is_unknown` |
-| `runs` | One comparison: current tool text, task, success criteria, `recommended_slug` (the Better cost slug), hashed IP |
+| `ai_tools` | Tool registry: name, aliases, `capability` (text, code, image, video, audio), optional `verified_model_slug` with required source URL and date |
+| `runs` | One comparison: current tool text, `use_case`, task, success criteria, `recommended_slug` (the Better cost slug), hashed IP |
 | `run_results` | One row per model: passed, quality band, estimated cost, cost per success, latency, error |
 | `audit_events` | One row per completed model call: model, tokens in/out, estimated cost, success |
 | `rate_limits` | Hashed IP, window start, count |
@@ -137,7 +149,7 @@ npm run build && npm start  # production build
 ## Routes
 
 - `/` comparison page
-- `POST /api/run` body `{ statement, current, alternatives[], criteria: { wordCap } }`
+- `POST /api/run` body `{ tool, useCase, task, models[], criteria: { wordCap } }`. Unsupported tool or task returns 422 before any model call or rate-limit use.
 - `GET /api/tools`
 - `/health` returns `{ "ok": true }`
 - `/pricing`, `/privacy`, `/terms`

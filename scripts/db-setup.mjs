@@ -13,7 +13,7 @@ const url = /sslmode=/.test(raw) ? raw : raw + (raw.includes("?") ? "&" : "?") +
 const client = new pg.Client({ connectionString: url });
 await client.connect();
 try {
-  for (const file of ["db/schema.sql", "db/seed.sql"]) {
+  for (const file of ["db/schema.sql", "db/seed.sql", "db/seed_ai_tools.sql"]) {
     const sql = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
     await client.query(sql);
     console.log(`applied ${file}`);
