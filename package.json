@@ -1,0 +1,27 @@
+{
+  "name": "realizah",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dollars per successful outcome for the AI tool you already pay for.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3000}",
+    "db:setup": "node scripts/db-setup.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "next": "^15.5.27",
+    "pg": "^8.23.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "typescript": "^5.9.3"
+  }
+}
