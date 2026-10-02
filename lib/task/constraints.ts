@@ -22,6 +22,12 @@ function all(re: RegExp, s: string): RegExpMatchArray[] {
   return [...s.matchAll(re)];
 }
 
+// "each/every/per" + the item and its verb phrase (up to six words, one
+// clause: no comma or conjunction can match here) right before a limit.
+const PER_ITEM_LEAD = /\b(?:each|every|per)\s+((?:(?!(?:and|or|but|then|so|because|while)\b)[a-z0-9-]+\s+){0,6})$/i;
+// Nouns that mean the whole reply rather than one item of it.
+const WHOLE_REPLY = /\b(?:response|reply|answer|message|output|whole|entire|total|overall|altogether)\b/i;
+
 export function extractWordCount(task: string): WordCount | null {
   const t = task.replace(/\s+/g, " ");
   let min: number | null = null;
@@ -33,10 +39,17 @@ export function extractWordCount(task: string): WordCount | null {
   const perItem = (m: RegExpMatchArray) => {
     const after = t.slice((m.index ?? 0) + m[0].length);
     if (/^\s*(?:each|apiece|per (?:item|line|bullet|point|tagline|headline|title|idea|option|sentence))\b/i.test(after)) return true;
-    // "Each tip under 12 words", "every bullet no more than 8 words": the
-    // item is named before the limit, within the same sentence.
-    const before = t.slice(0, m.index ?? 0).split(/[.!?;]\s/).pop() ?? "";
-    return /\b(?:each|every|per)\s+(?:[a-z-]+\s+){0,2}$/i.test(before);
+    // "Each tip under 12 words", "Each tip must contain no more than 8 words",
+    // "Every item should have fewer than 12 words", "Keep each tip to at most
+    // 8 words": the item is named before the limit, in the same clause, and
+    // only its verb phrase stands between them.
+    const before = t.slice(0, m.index ?? 0).split(/[.!?;:]\s/).pop() ?? "";
+    const lead = PER_ITEM_LEAD.exec(before);
+    if (!lead) return false;
+    // Not when the limit is about the whole reply: "each response must be
+    // under 50 words", "...each chapter in no more than 200 words total".
+    if (WHOLE_REPLY.test(lead[1]) || /^\s*(?:in\s+)?(?:total|overall|combined|altogether)\b/i.test(after)) return false;
+    return true;
   };
 
   // Ranges: "between 150 and 200 words", "150-200 words", "150 to 200 words".
