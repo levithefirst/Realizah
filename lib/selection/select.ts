@@ -73,8 +73,12 @@ export type SelectionResult = {
 const BENCHMARK_FOR: Record<string, string> = { coding: "coding_index", mathematics: "math_index" };
 const REASONING_TASKS = new Set(["reasoning", "mathematics", "analysis", "coding", "research"]);
 
+// Free means no charge for the call: a ":free" variant, or any route with a
+// known $0 input, $0 output and no per-request fee. Free routes may only be
+// free-screening runs; they never take a paid role or a cost label.
 export function isFreeAccess(a: RegistryAccess): boolean {
-  return a.externalModelId.endsWith(":free");
+  if (a.externalModelId.endsWith(":free")) return true;
+  return a.priceStatus !== "unknown" && a.inputUsdPer1m === 0 && a.outputUsdPer1m === 0 && (a.requestUsd ?? 0) === 0;
 }
 
 // "openai/gpt-4o-mini-2024-07-18" and "openai/gpt-4o-mini" are one family;

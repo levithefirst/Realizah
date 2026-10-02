@@ -18,7 +18,7 @@
 // timed-out call is charged its worst case (the provider may still bill it).
 import type { ExecutionLimits } from "../config";
 import type { ChatMessage, ProviderAdapter } from "../providers/types";
-import type { Candidate, PriceTier, SelectionResult } from "../selection/select";
+import { isFreeAccess, type Candidate, type PriceTier, type SelectionResult } from "../selection/select";
 import type { TaskUnderstanding } from "../task/understand";
 import { runCandidate, type CandidateOutcome } from "./execute";
 
@@ -50,7 +50,9 @@ export type ProgressiveResult = {
 };
 
 export function isLabelEligible(o: { candidate: Candidate }): boolean {
-  return o.candidate.role !== "free_screening";
+  // A $0 route never carries a cost label, whatever role it ended up with.
+  const a = o.candidate.access;
+  return o.candidate.role !== "free_screening" && !(a && isFreeAccess(a));
 }
 
 export function meaningfulness(outcomes: StagedOutcome[], selection: Pick<SelectionResult, "tiersAvailable" | "creatorsAvailable">, minCandidates: number) {
