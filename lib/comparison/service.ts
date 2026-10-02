@@ -9,13 +9,14 @@ import { executionLimits } from "../config";
 import { budgetLine } from "../budget";
 import { assignLabels } from "../labels";
 import { currentToolBaseline, matchProduct, type Baseline } from "../products";
-import { configuredAdapters } from "../providers";
+import { providerReadiness, recordAuthFailure, type ProviderStatus } from "../providers/readiness";
+import type { ProviderAdapter } from "../providers/types";
 import { loadRegistry, registryStats } from "../registry/load";
 import { lastRefresh, refreshRegistry } from "../registry/refresh";
 import { selectCandidates, type Candidate, type CandidateRole, type PriceTier, type SelectionResult } from "../selection/select";
-import { understandTask, type TaskUnderstanding } from "../task/understand";
+import { applyWordMaxOverride, understandTask, type TaskUnderstanding } from "../task/understand";
 import { buildMessages, type CandidateOutcome } from "./execute";
-import { isLabelEligible, labelOutcomes, runProgressive } from "./progressive";
+import { isLabelEligible, labelOutcomes, runProgressive, systemicFailure } from "./progressive";
 import type { Check } from "../evaluation/evaluate";
 import { comparisonSummary } from "./summary";
 
@@ -44,7 +45,9 @@ export type Plan = {
   understanding: TaskUnderstanding;
   executable: boolean;
   reason: string | null;
+  // Providers that can execute (configured and not known to reject the key).
   providersConfigured: string[];
+  providers: ProviderStatus[];
   discoverableModels: number;
   considered: number;
   capableInRegistry: number;
@@ -123,6 +126,9 @@ export type ComparisonDTO = {
   skipped: SkippedDTO[];
   stopReason: string;
   labelsWithheld: string | null;
+  // Set when no model returned a reply for reasons outside the user's task
+  // (provider auth, network, timeouts). Such a run doesn't use a free comparison.
+  systemicFailure: string | null;
   budgetUsd: number | null;
   executionBudgetUsd: number;
   estimatedExecutionCostUsd: number;
@@ -153,17 +159,25 @@ const toDTO = (c: Candidate): CandidateDTO => ({
   reason: c.reason,
 });
 
-export async function planComparison(input: ComparisonInput) {
+// adapters: the providers allowed to execute. Defaults to the configured ones
+// minus any known to be rejecting their key (no network call); /api/run
+// passes the set it has just verified.
+export async function planComparison(input: ComparisonInput, opts: { adapters?: Map<string, ProviderAdapter> } = {}) {
   const products = await listProducts();
   const product = matchProduct(input.toolInput, products);
-  const understanding = understandTask({ task: input.task, useCase: input.useCase, productCapability: product?.capability ?? null });
-  const adapters = configuredAdapters();
+  const understanding = applyWordMaxOverride(
+    understandTask({ task: input.task, useCase: input.useCase, productCapability: product?.capability ?? null }),
+    input.wordMaxOverride
+  );
+  const readiness = opts.adapters ? null : await providerReadiness({ verify: false });
+  const adapters = opts.adapters ?? readiness!.ready;
   const limits = executionLimits();
   const productDTO = { name: product?.name ?? input.toolInput.trim(), slug: product?.slug ?? null, capability: product?.capability ?? null };
   const empty = {
     product: productDTO,
     understanding,
     providersConfigured: [...adapters.keys()],
+    providers: readiness?.statuses ?? [...adapters.keys()].map((p) => ({ provider: p, state: "ready" as const, detail: null, checkedAt: null })),
     executionBudgetUsd: limits.maxExecutionCostUsd,
     maxPaidRuns: limits.maxCandidates,
     minPaidRuns: limits.minCandidates,
@@ -210,7 +224,7 @@ export async function planComparison(input: ComparisonInput) {
   });
 
   let reason: string | null = null;
-  if (adapters.size === 0) reason = "No execution provider is configured on the server (OPENROUTER_API_KEY or OPENAI_API_KEY).";
+  if (adapters.size === 0) reason = "No model provider is available right now (OPENROUTER_API_KEY and OPENAI_API_KEY are missing, invalid or rejected).";
   else if (limits.maxExecutionCostUsd <= 0)
     reason = "Realizah's execution budget (MAX_EXECUTION_COST_USD) is $0, so no paid model can run. Free-tier screening alone can't produce cost labels.";
   else if (selection.candidates.length < 2)
@@ -256,14 +270,18 @@ export async function runComparison(
   ipHash: string,
   selection: SelectionResult,
   understanding: TaskUnderstanding,
-  product: Awaited<ReturnType<typeof planComparison>>["product"]
+  product: Awaited<ReturnType<typeof planComparison>>["product"],
+  adaptersIn?: Map<string, ProviderAdapter>
 ): Promise<ComparisonDTO> {
   const limits = executionLimits();
-  const adapters = configuredAdapters();
+  const adapters = adaptersIn ?? (await providerReadiness({ verify: false })).ready;
   const messages = buildMessages(input.task);
   const progress = await runProgressive({ selection, messages, adapters, understanding, limits, wordMaxOverride: input.wordMaxOverride });
   const outcomes = progress.outcomes;
   const eligible = outcomes.filter(isLabelEligible);
+  // A provider that rejected every call's key is skipped by later plans.
+  for (const f of progress.providerFailures) if (f.errorKind === "auth") recordAuthFailure(f.providerId, f.message);
+  const systemic = systemicFailure(progress);
   const labels = labelOutcomes(outcomes, assignLabels);
 
   const verifiedOutcome = product?.verifiedModelId ? eligible.find((o) => o.candidate.model.id === product.verifiedModelId) : null;
@@ -284,6 +302,7 @@ export async function runComparison(
     baseline,
   });
   if (labels.withheld) summary = `No cost labels: ${labels.withheld}`;
+  if (systemic) summary = `No model returned a reply: ${systemic}. This run did not use one of your free comparisons.`;
 
   const client = await db().connect();
   let runId: string;
@@ -508,6 +527,7 @@ export async function runComparison(
     })),
     stopReason: progress.stopReason,
     labelsWithheld: labels.withheld,
+    systemicFailure: systemic,
     budgetUsd: input.budgetUsd,
     executionBudgetUsd: limits.maxExecutionCostUsd,
     estimatedExecutionCostUsd: selection.estimatedExecutionCostUsd,

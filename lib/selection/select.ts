@@ -3,7 +3,8 @@
 // (comparison/progressive.ts) decides how much of it actually executes.
 //
 // 1. Capability   output modality, text input, context window, output capacity
-// 2. Access       configured provider, known price, not a known-incompatible id
+// 2. Access       configured provider, interactive (not :batch), known price,
+//                 not a known-incompatible id
 // 3. Cost         worst case per model within MAX_COST_PER_CANDIDATE_USD and the
 //                 run cap; then the user's per-task budget
 // 4. Relevance    task-relevant benchmark, verified capabilities, freshness
@@ -16,6 +17,7 @@
 //
 // Pure: no database, no env, no network.
 import type { ExecutionLimits } from "../config";
+import { isInteractive } from "../registry/execution";
 import { expectedInputTokens, taskCostUsd, worstCaseCostUsd, worstCaseInputTokens } from "../pricing";
 import type { RegistryAccess, RegistryModel } from "../registry/types";
 import { expectedOutputTokens, outputBudget, outputTokensFor } from "../task/outputBudget";
@@ -42,6 +44,7 @@ export type ExclusionReason =
   | "context_too_small"
   | "output_limit_too_small"
   | "no_configured_provider"
+  | "batch_only"
   | "incompatible_access"
   | "free_tier_only"
   | "price_unknown"
@@ -158,7 +161,14 @@ export function selectCandidates(opts: {
       count(excluded, "no_configured_provider");
       continue;
     }
-    const usable = configured.filter((a) => a.chatSupported !== false);
+    // Comparisons are synchronous: asynchronous access paths (":batch") are
+    // never candidates. A model with a realtime path still competes on it.
+    const interactive = configured.filter(isInteractive);
+    if (!interactive.length) {
+      count(excluded, "batch_only");
+      continue;
+    }
+    const usable = interactive.filter((a) => a.chatSupported !== false);
     if (!usable.length) {
       count(excluded, "incompatible_access");
       continue;

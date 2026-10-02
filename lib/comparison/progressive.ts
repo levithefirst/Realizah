@@ -12,12 +12,18 @@
 // every available price tier tried, and at least min(3, available) creators.
 // Stopping never looks at which model is cheapest, so it can't favor one.
 //
+// Systemic failures: a provider is treated as down, and nothing more is
+// launched on it, when it has no success and either answered with HTTP 401
+// (its credentials were rejected: account-wide, not per model), or failed
+// at least twice with the same auth/network error. Ordinary per-model
+// failures (a 403 on one gated model, a bad request, a timeout) never do.
+//
 // Spend: before launching a paid call, actual spend + in-flight worst-case
 // reservations + this call's worst case must fit MAX_EXECUTION_COST_USD.
 // Worst case = byte-level input bound + the call's max output tokens. A
 // timed-out call is charged its worst case (the provider may still bill it).
 import type { ExecutionLimits } from "../config";
-import type { ChatMessage, ProviderAdapter } from "../providers/types";
+import type { ChatMessage, ProviderAdapter, RunModelResult } from "../providers/types";
 import { isFreeAccess, type Candidate, type PriceTier, type SelectionResult } from "../selection/select";
 import type { TaskUnderstanding } from "../task/understand";
 import { runCandidate, type CandidateOutcome } from "./execute";
@@ -25,7 +31,7 @@ import { runCandidate, type CandidateOutcome } from "./execute";
 export const EXPANSION_WAVE_SIZE = 2;
 const EPS = 1e-12;
 
-export type SkipKind = "budget" | "meaningful" | "candidate_limit" | "spend_anomaly";
+export type SkipKind = "budget" | "meaningful" | "candidate_limit" | "spend_anomaly" | "provider_failure";
 export type StagedOutcome = CandidateOutcome & { stage: number };
 export type Skipped = { candidate: Candidate; kind: SkipKind; reason: string };
 
@@ -47,7 +53,15 @@ export type ProgressiveResult = {
   stopReason: string;
   meaningful: boolean;
   paidAttempted: number;
+  // Providers declared down during this run (same systemic error on every call).
+  providerFailures: ProviderFailure[];
 };
+
+export type ProviderFailure = { providerId: string; errorKind: NonNullable<RunModelResult["errorKind"]>; message: string; calls: number };
+
+// Errors that are about the provider or the account, not the model or task.
+const PROVIDER_LEVEL: ReadonlySet<string> = new Set(["auth", "network"]);
+const MIN_FAILURES_FOR_SYSTEMIC = 2;
 
 export function isLabelEligible(o: { candidate: Candidate }): boolean {
   // A $0 route never carries a cost label, whatever role it ended up with.
@@ -88,6 +102,26 @@ export async function runProgressive(opts: {
   let reserved = 0;
   let paidLaunched = 0;
 
+  // Per-provider call history, to spot a provider that fails every call.
+  const history = new Map<string, { ok: number; failures: { kind: string; message: string; status: number | null }[] }>();
+  const record = (providerId: string, run: RunModelResult) => {
+    const h = history.get(providerId) ?? { ok: 0, failures: [] };
+    if (run.ok) h.ok++;
+    else h.failures.push({ kind: run.errorKind ?? "provider_error", message: run.error ?? "", status: run.httpStatus ?? null });
+    history.set(providerId, h);
+  };
+  const providerDown = (providerId: string): ProviderFailure | null => {
+    const h = history.get(providerId);
+    if (!h || h.ok > 0 || !h.failures.length) return null;
+    const [first] = h.failures;
+    if (!PROVIDER_LEVEL.has(first.kind)) return null;
+    const credentialsRejected = h.failures.every((f) => f.status === 401);
+    if (!credentialsRejected && h.failures.length < MIN_FAILURES_FOR_SYSTEMIC) return null;
+    if (!h.failures.every((f) => f.kind === first.kind && f.message === first.message)) return null;
+    return { providerId, errorKind: first.kind as ProviderFailure["errorKind"], message: first.message, calls: h.failures.length };
+  };
+  const downReason = (f: ProviderFailure) => `Not run: all ${f.calls} calls to ${f.providerId} failed with the same ${f.errorKind} error (${f.message || "no message"}).`;
+
   const remaining = [...selection.candidates];
   const remove = (c: Candidate) => remaining.splice(remaining.indexOf(c), 1);
   const skip = (c: Candidate, kind: SkipKind, reason: string) => skipped.push({ candidate: c, kind, reason });
@@ -110,6 +144,7 @@ export async function runProgressive(opts: {
         wordMaxOverride: opts.wordMaxOverride,
       }).then((o) => {
         reserved -= hold;
+        record(c.access.providerId, o.run);
         const known = o.estimatedCostUsd ?? 0;
         const charged = o.run.errorKind === "timeout" ? hold : known;
         ledger.actualUsd += known;
@@ -129,6 +164,12 @@ export async function runProgressive(opts: {
         const paid = c.role !== "free_screening";
         if (ledger.anomaly) {
           skip(c, "spend_anomaly", "Stopped: a call cost more than its reserved worst case.");
+          pending.splice(i, 1);
+          continue;
+        }
+        const down = providerDown(c.access.providerId);
+        if (down) {
+          skip(c, "provider_failure", downReason(down));
           pending.splice(i, 1);
           continue;
         }
@@ -178,6 +219,17 @@ export async function runProgressive(opts: {
       for (const c of remaining) skip(c, "spend_anomaly", "Stopped: a call cost more than its reserved worst case.");
       break;
     }
+    // Drop everything queued on a provider that is down.
+    for (const c of remaining.filter((x) => providerDown(x.access.providerId))) {
+      remove(c);
+      skip(c, "provider_failure", downReason(providerDown(c.access.providerId)!));
+    }
+    const failures = [...history.keys()].map(providerDown).filter((f): f is ProviderFailure => f !== null);
+    if (!remaining.length && failures.length && !outcomes.some((o) => o.run.ok)) {
+      const f = failures[0];
+      stopReason = `Stopped early: every call to ${f.providerId} failed with the same ${f.errorKind} error (${f.message || "no message"}). No more models were launched.`;
+      break;
+    }
     if (!remaining.length) {
       stopReason = m.paid ? `All ${m.paid} queued models that fit the cap were tried.` : "No paid model could run within the cap.";
       break;
@@ -208,7 +260,25 @@ export async function runProgressive(opts: {
 
   const final = meaningfulness(outcomes, selection, limits.minCandidates);
   if (!stopReason) stopReason = final.meaningful ? "Meaningful comparison reached." : "Stopped.";
-  return { outcomes, skipped, ledger, stopReason, meaningful: final.meaningful, paidAttempted: final.paid };
+  const providerFailures = [...history.keys()].map(providerDown).filter((f): f is ProviderFailure => f !== null);
+  return { outcomes, skipped, ledger, stopReason, meaningful: final.meaningful, paidAttempted: final.paid, providerFailures };
+}
+
+// Failures that say nothing about the user's task: the provider, the account,
+// the network or Realizah's registry. A run where nothing succeeded and every
+// failure is one of these did not give the user a comparison, so it must not
+// use their free allowance. A provider_error (e.g. a 400 the task itself may
+// have caused) is not on the list.
+const NOT_THE_USERS_FAULT: ReadonlySet<string> = new Set(["auth", "network", "rate_limited", "timeout", "not_found", "unsupported_endpoint"]);
+
+export function systemicFailure(res: Pick<ProgressiveResult, "outcomes" | "providerFailures">): string | null {
+  if (res.outcomes.some((o) => o.run.ok)) return null;
+  if (res.outcomes.length === 0) return "No model could be run.";
+  if (!res.outcomes.every((o) => NOT_THE_USERS_FAULT.has(o.run.errorKind ?? ""))) return null;
+  const f = res.providerFailures[0];
+  if (f) return `every call to ${f.providerId} failed (${f.errorKind}: ${f.message || "no message"})`;
+  const kinds = [...new Set(res.outcomes.map((o) => o.run.errorKind))].join(", ");
+  return `no model returned a reply (${kinds})`;
 }
 
 // Labels over the measured results that are eligible: paid candidates only

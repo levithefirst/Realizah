@@ -1,5 +1,6 @@
 // OpenRouter model catalog: discovery + prices for the OpenRouter access path.
 // Public endpoint; no key needed to read it.
+import { baseModelId, variantOf } from "../execution";
 import type { NormalizedAccess, NormalizedModel, NormalizedPrice } from "../types";
 
 export const OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1/models";
@@ -35,9 +36,11 @@ function isoDate(v: unknown): string | null {
   return null;
 }
 
-// Free variants ("x/y:free") are an access path of the same model, not a new model.
+// Variants ("x/y:free", "x/y:batch") are access paths of the same model, not
+// new models. Whether a path can serve an interactive comparison is its
+// execution class (registry/execution.ts).
 export function baseSlug(id: string): string {
-  return id.endsWith(":free") ? id.slice(0, -":free".length) : id;
+  return baseModelId(id);
 }
 
 export function isFreeVariant(externalModelId: string): boolean {
@@ -70,14 +73,14 @@ export function normalizeOpenRouterCatalog(rows: OpenRouterCatalogModel[]): {
       continue;
     }
     const slug = baseSlug(r.id);
-    const free = isFreeVariant(r.id);
+    const variant = variantOf(r.id);
     const existing = models.get(slug);
-    // Prefer the paid entry's metadata when both paid and free are listed.
-    if (!existing || (!free && existing)) {
+    // Prefer the plain (paid, interactive) entry's metadata over a variant's.
+    if (!existing || variant === null) {
       models.set(slug, {
         slug,
         creator: slug.split("/")[0],
-        name: (r.name ?? slug).replace(/\s*\(free\)\s*$/i, ""),
+        name: (r.name ?? slug).replace(/\s*\((?:free|batch)\)\s*$/i, ""),
         description: r.description ?? null,
         inputModalities: r.architecture?.input_modalities ?? [],
         outputModalities: r.architecture?.output_modalities ?? [],

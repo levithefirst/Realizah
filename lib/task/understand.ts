@@ -102,6 +102,11 @@ const RULES: [TaskCategory, number, RegExp][] = [
   ["extraction", 4, /\b(extract|pull out|parse|find all|list all|identify all|entities)\b/i],
   ["summarization", 4, /\b(summari[sz]e|summary|tl;?dr|recap|condense|key points|key takeaways)\b/i],
   ["mathematics", 4, /\b(solve|equation|integral|derivative|prove that|probability|arithmetic|algebra|calculus|math)\b|\d+\s*[\^*/+-]\s*\d+\s*=/i],
+  // A bare arithmetic expression ("17*19", "3.5 × 4", "2^10", "120 / 8 + 3")
+  // or a request to compute one. Hyphens and slashes alone are too ambiguous
+  // (dates, ranges, "5-10 words"), so + - / count only after "what is"-style
+  // asks; * x × ÷ ^ between numbers count anywhere.
+  ["mathematics", 4, /\d(?:[\d.,]*\d)?\s*[*×÷^]\s*\(?-?\d|\b(?:what(?:'s| is)|calculate|compute|evaluate|how much is)\s+\(?-?\d[\d.,]*\s*(?:[-+*/×÷^x]|times|plus|minus|divided by)\s*\(?-?\d|\b(?:calculate|compute)\b|\b(?:square root|cube root|factorial|percent(?:age)? of|multiply|divided by)\b/i],
   ["reasoning", 3, /\b(logic puzzle|riddle|reason (?:about|through)|step[- ]by[- ]step|deduce|which (?:option|answer) is (?:correct|true)|chain of thought)\b/i],
   ["research", 4, /\b(research|find sources|cite|citations?|references|literature review|what does the (?:research|evidence) say|market research|competitor research)\b/i],
   ["analysis", 3, /\b(analy[sz]e|analysis|evaluate|assess|compare|pros and cons|swot|insights|trends|critique)\b/i],
@@ -231,3 +236,18 @@ export const CATEGORY_LABEL: Record<TaskCategory, string> = {
   speech_to_text: "speech to text",
   text_to_speech: "text to speech",
 };
+
+// The user's explicit word limit replaces whatever the task text implied.
+// Applied before planning, so the output budget, selection, max_tokens and
+// evaluation all use the same limit.
+export function applyWordMaxOverride(u: TaskUnderstanding, wordMax: number | null | undefined): TaskUnderstanding {
+  if (wordMax == null) return u;
+  return {
+    ...u,
+    constraints: {
+      ...u.constraints,
+      wordCount: { min: null, max: wordMax, target: null, perItemMax: u.constraints.wordCount?.perItemMax ?? null, phrase: `your ${wordMax}-word limit` },
+    },
+    signals: [...u.signals, `word limit set by you: ${wordMax}`],
+  };
+}

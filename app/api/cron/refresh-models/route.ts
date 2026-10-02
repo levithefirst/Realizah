@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errorForLog } from "@/lib/redact";
 import { db, hasDatabase } from "@/lib/db";
 import { refreshRegistry } from "@/lib/registry/refresh";
 
@@ -27,7 +28,7 @@ export async function GET(req: Request) {
   try {
     return NextResponse.json(await refreshRegistry());
   } catch (e) {
-    console.error("refresh failed", e);
+    console.error("refresh failed", errorForLog(e));
     return NextResponse.json({ error: "Refresh failed; the last snapshot is still in use." }, { status: 500 });
   }
 }

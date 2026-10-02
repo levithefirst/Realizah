@@ -20,7 +20,7 @@ export async function chatCompletions(opts: {
     const json = (await res.json().catch(() => null)) as any;
     if (!res.ok) {
       const message = json?.error?.message ?? `HTTP ${res.status}`;
-      return failure(started, String(message).slice(0, 300), errorKindFromResponse(res.status, String(message)));
+      return failure(started, String(message).slice(0, 300), errorKindFromResponse(res.status, String(message)), res.status);
     }
     if (json?.error) {
       return failure(started, String(json.error.message ?? "provider error").slice(0, 300), "provider_error");

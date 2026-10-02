@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errorForLog } from "@/lib/redact";
 import { hasDatabase } from "@/lib/db";
 import { parseComparisonInput } from "@/lib/comparison/input";
 import { planComparison } from "@/lib/comparison/service";
@@ -28,7 +29,7 @@ async function plan(body: Record<string, unknown>) {
     const { plan } = await planComparison(parsed.input);
     return NextResponse.json(plan);
   } catch (e) {
-    console.error("plan failed", e);
+    console.error("plan failed", errorForLog(e));
     return NextResponse.json({ error: "Could not plan this comparison. Try again." }, { status: 500 });
   }
 }

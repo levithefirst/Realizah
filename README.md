@@ -114,6 +114,14 @@ Everything below happens before or between model calls; none of it changes the d
   case fit `MAX_EXECUTION_COST_USD`. Worst case = UTF-8 bytes of the task (no byte-level tokenizer produces
   more tokens than bytes) + message overhead, plus the call's max output tokens, at its price snapshot. A
   timed-out call is charged its worst case. If any call ever bills above its reserved bound, launching stops.
+- **Interactive only**: comparisons are synchronous chat-completions calls. Access paths with another
+  execution class (OpenRouter's `:batch` SKUs, `lib/registry/execution.ts`) are access paths of their model,
+  never candidates; a model with both a batch and a realtime route competes on the realtime one.
+- **`wordMax`**: an explicit word limit replaces the task's own word constraint before planning, so it sets the
+  output ceiling, selection, every call's max tokens and evaluation (e.g. `wordMax=30` -> 106 tokens).
+- **Systemic failures stop early**: once a provider has rejected its credentials (HTTP 401), or failed at least
+  twice with the same auth/network error and never succeeded, nothing more is launched on it. Ordinary
+  per-model failures (a 403 on one gated model, a bad request, a timeout) never trigger this.
 - **Audit**: each run stores candidates considered, filtered (by reason), queued, executed and skipped (with
   reason), the expected cost beforehand, the peak reserved worst case, the actual cost, and the stop reason.
 
@@ -152,12 +160,34 @@ ceilings below it), `TIMEOUT_MS` (60s per model), `MAX_CONCURRENT_MODELS` (5), `
 3 free comparisons per day per hashed IP. Unsupported tasks and empty candidate sets are refused before any
 spend or rate-limit use. All execution is server-side; keys never reach the browser.
 
+**Provider readiness.** A provider counts as available only with a usable key (`lib/providers/credentials.ts`
+rejects empty, whitespace, placeholder and malformed values, and strips pasted quotes or a `Bearer ` prefix)
+that the provider has not rejected. `/api/run` and `/api/models` verify keys with a non-billable probe
+(OpenRouter `GET /api/v1/key`, OpenAI `GET /v1/models`), cached per server instance (10 min when valid, 5 min
+when rejected); `/api/plan` never probes and only honours known failures. Auth failures seen during real runs
+mark the provider unavailable the same way. If no provider is available, `/api/run` returns 503 before using a
+free comparison. Error messages and logs are redacted of anything key-like.
+
+**Fallback between providers.** Each model runs on one access path chosen at planning time; there is no
+per-call retry on another provider. Failover happens at planning: when OpenRouter is unavailable, selection
+only sees providers that are (e.g. OpenAI direct), so OpenAI models run directly.
+
+**Free comparisons are only used by real comparisons.** If no model returns a reply and every failure is
+outside the user's task (auth, network, rate limit, timeout, unknown or retired model id), or the run fails on
+Realizah's side, the comparison is given back (`refundToken`, at most once, same 24h window, never below
+zero). A task-caused provider error (e.g. HTTP 400) is not refunded.
+
+**Quota identity.** The free limit is keyed by a salted hash of the leftmost `x-forwarded-for` entry, which
+Vercel sets from the TCP connection and overwrites when a client sends its own. Two clients on different
+networks (or IPv4 vs IPv6) are two identities; the browser shows "remaining" only from its own `/api/run` reply.
+
 ## API
 
 - `POST /api/plan` (or `GET /api/plan?tool=&useCase=&task=`) task understanding and candidate selection,
   no model calls.
 - `POST /api/run` `{ tool, useCase, task, budgetUsd?, wordMax? }` runs the comparison.
-- `GET /api/models` registry counts: discoverable, executable, by provider, last refresh.
+- `GET /api/models` registry counts: discoverable, executable, by provider, last refresh, and each provider's
+  readiness (`ready`, `unverified`, `not_configured` with the reason, `auth_failed`), never the key.
 - `GET /api/cron/refresh-models` daily refresh (Bearer `CRON_SECRET` if set; otherwise at most hourly).
 - `GET /health`
 
