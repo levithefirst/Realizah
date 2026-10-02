@@ -4,6 +4,7 @@
 import ts from "typescript";
 import { TARGET_TOLERANCE } from "../task/constraints";
 import type { TaskUnderstanding } from "../task/understand";
+import { arithmeticAnswer, numbersIn, replyHasValue } from "./arithmetic";
 import { RULES, type RuleKey } from "./rules";
 
 export type CheckStatus = "pass" | "fail" | "not_checked";
@@ -112,11 +113,113 @@ function listItems(text: string): string[] {
     .map((l) => l.replace(/^(?:[-*•]|\d{1,2}[.)])\s+/, ""));
 }
 
+// Extracted values must come from the source. Numbers, phone numbers, emails
+// and links are compared exactly (digits only for numbers); invented ones
+// fail. Text values are compared verbatim; a rephrased value is legitimate,
+// so it is reported as not checked rather than failed.
+const DIGITS = /\+?\d[\d\s().-]{1,}\d|\d{3,}/g;
+const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g;
+const URL = /https?:\/\/[^\s)"'<>]+/g;
+
+function extractedValues(reply: string): string[] {
+  const parsed = extractJson(reply);
+  const values: string[] = [];
+  if (parsed.ok && parsed.value && typeof parsed.value === "object") {
+    const walk = (v: unknown) => {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") Object.values(v).forEach(walk);
+      else if (typeof v === "string" || typeof v === "number") values.push(String(v));
+    };
+    walk(parsed.value);
+    return values;
+  }
+  for (const line of reply.replace(/```[\w-]*\n?|```/g, "").split("\n")) {
+    const l = line.replace(/^\s*(?:[-*•]|\d{1,2}[.)])\s+/, "").trim();
+    if (!l) continue;
+    const kv = /^\**[^:|]{1,40}?\**\s*:\s*(.+)$/.exec(l);
+    if (kv) values.push(kv[1]);
+    else if (l.includes(",")) values.push(...l.split(",")); // CSV rows
+    else values.push(l);
+  }
+  return values.map((v) => v.replace(/^\*+|\*+$/g, "").trim()).filter(Boolean);
+}
+
+function extractionChecks(reply: string, source: string): { rule: RuleKey; status: CheckStatus; detail: string }[] {
+  const srcLower = source.toLowerCase().replace(/\s+/g, " ");
+  const srcDigits = [...source.matchAll(DIGITS)].map((m) => m[0].replace(/\D/g, ""));
+  const srcNumbers = numbersIn(source);
+  // A number is known if its digits appear in a source number (phones keep
+  // their digits whatever the spacing) or it equals one numerically (2.5 / 2.50).
+  const numberKnown = (raw: string) => {
+    const d = raw.replace(/\D/g, "");
+    const n = Number(raw.replace(/[^\d.-]/g, ""));
+    if (srcDigits.some((s) => s.includes(d)) || (Number.isFinite(n) && srcNumbers.includes(n))) return true;
+    // Phone numbers reformatted with a country code or trunk prefix
+    // ("0803 123 4567" -> "+234 803 123 4567"): same trailing digits.
+    return d.length >= 8 && srcDigits.some((s) => {
+      const k = Math.min(d.length, s.length, 10);
+      return k >= 8 && d.slice(-k) === s.slice(-k);
+    });
+  };
+  const hard = new Map<string, boolean>();
+  for (const re of [EMAIL, URL]) for (const m of reply.matchAll(re)) hard.set(m[0].toLowerCase(), srcLower.includes(m[0].toLowerCase()));
+  for (const m of reply.matchAll(DIGITS)) {
+    const raw = m[0].trim();
+    // Dates are often reformatted ("Oct 1, 2024" -> "2024-10-01"): not a hard check.
+    if (/^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$/.test(raw)) continue;
+    hard.set(raw, numberKnown(raw));
+  }
+  const invented = [...hard].filter(([, known]) => !known).map(([v]) => v);
+  const checks: { rule: RuleKey; status: CheckStatus; detail: string }[] = [];
+  checks.push(
+    hard.size === 0
+      ? { rule: "extraction_values", status: "not_checked", detail: "No numbers, emails or links in the reply to verify." }
+      : invented.length
+        ? { rule: "extraction_values", status: "fail", detail: `Not in the source: ${invented.slice(0, 3).join(", ")}.` }
+        : { rule: "extraction_values", status: "pass", detail: `${hard.size} value(s) found in the source.` }
+  );
+  const text = extractedValues(reply).filter((v) => /[A-Za-z]/.test(v) && !/https?:|@/.test(v));
+  const unseen = text.filter((v) => !srcLower.includes(v.toLowerCase().replace(/\s+/g, " ").replace(/[.;]$/, "")));
+  checks.push(
+    text.length === 0
+      ? { rule: "extraction_text", status: "not_checked", detail: "No text values to compare." }
+      : unseen.length
+        ? { rule: "extraction_text", status: "not_checked", detail: `${unseen.length} of ${text.length} text value(s) not found verbatim (may be rephrased).` }
+        : { rule: "extraction_text", status: "pass", detail: `All ${text.length} text value(s) found in the source.` }
+  );
+  return checks;
+}
+
+// Rules whose details can quote the task or the model's reply (field names,
+// phrases, invented values, parser messages with code or JSON snippets).
+// Permanent records keep only a content-free version; the full wording is
+// stored with the reply and deleted with it (see applyRetention).
+const CONTENT_DETAIL_RULES = new Set<string>([
+  RULES.json_fields.id,
+  RULES.format_json.id,
+  RULES.sections.id,
+  RULES.must_include.id,
+  RULES.code_syntax.id,
+  RULES.math_answer.id,
+  RULES.extraction_values.id,
+  RULES.extraction_text.id,
+]);
+
+export function contentFreeChecks(checks: Check[]): Check[] {
+  return checks.map((c) =>
+    CONTENT_DETAIL_RULES.has(c.rule)
+      ? { ...c, detail: c.status === "pass" ? "Passed." : c.status === "fail" ? "Failed." : "Not checked." }
+      : c
+  );
+}
+
 export function evaluate(
   text: string,
   finishReason: string | null,
   u: TaskUnderstanding,
-  overrides: { wordMax?: number | null } = {}
+  // wordMax: the user's explicit limit. source: the prompt the model was
+  // given (the task), for correctness checks that compare against it.
+  overrides: { wordMax?: number | null; source?: string } = {}
 ): Evaluation {
   const checks: Check[] = [];
   const add = (key: RuleKey, status: CheckStatus, detail: string) =>
@@ -221,6 +324,21 @@ export function evaluate(
     const missing = c.mustInclude.filter((s) => !lower.includes(s.toLowerCase()));
     add("must_include", missing.length ? "fail" : "pass", missing.length ? `Missing: ${missing.map((m) => `"${m}"`).join(", ")}.` : "All phrases present.");
   }
+  // Correctness, where it can be verified deterministically.
+  if (u.primary === "mathematics" || u.primary === "reasoning") {
+    const expected = overrides.source ? arithmeticAnswer(overrides.source) : null;
+    if (expected) {
+      const ok = replyHasValue(text, expected.value);
+      const shown = Number.isInteger(expected.value) ? String(expected.value) : String(Math.round(expected.value * 1e6) / 1e6);
+      add("math_answer", ok ? "pass" : "fail", ok ? `States ${shown} (${expected.expression}).` : `Expected ${shown} for ${expected.expression}; not found in the reply.`);
+    } else {
+      add("math_answer", "not_checked", "The answer's correctness is not verified automatically for this task.");
+    }
+  }
+  if (u.primary === "extraction" && overrides.source) {
+    for (const ch of extractionChecks(text, overrides.source)) add(ch.rule, ch.status, ch.detail);
+  }
+
   if (c.language && c.language !== "english") {
     add("language", "not_checked", `Requested ${c.language}; not verified automatically.`);
   }

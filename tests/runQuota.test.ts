@@ -124,7 +124,7 @@ test("the auth probe rejects the key: 503 before any model call or quota use", a
 });
 
 test("a server error after the quota was taken gives it back (once)", async () => {
-  await pg.exec(`drop table budget_plans; drop table comparison_results; drop table comparison_candidates; drop table comparison_runs cascade;`);
+  await pg.exec(`drop table comparison_outputs; drop table budget_plans; drop table comparison_results; drop table comparison_candidates; drop table comparison_runs cascade;`);
   const res = await POST(request());
   assert.equal(res.status, 500);
   assert.match((await res.json()).error, /Your free comparison was not used/);

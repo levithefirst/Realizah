@@ -151,6 +151,17 @@ required phrases. A reply passes when every checkable rule passes. Rules Realiza
 code tests, checking the language) are shown as "not checked" and never affect pass/fail. There is no quality
 score.
 
+Correctness, where it can be verified deterministically:
+- `math_answer.v1` (mathematics and reasoning): when the task states one unambiguous computation ("17*19",
+  "15% of 240", "square root of 144"; a small parser, no eval), the reply must state its value. Otherwise
+  (word problems, equations) it is reported as "not checked", so a pass never implies a verified answer.
+- `extraction_values.v1` (extraction): every number, phone number, email and link in the reply must appear in
+  the task's source text (numbers by digits or value; phone numbers by trailing digits; dates are exempt).
+- `extraction_text.v1`: extracted text values found verbatim pass; rephrased ones are "not checked", never failed.
+
+Permanent result rows store content-free check details; the full wording (which can quote the task or the
+reply) is stored with the reply and deleted with it.
+
 ## Cost, labels, baseline and budget
 
 - Estimated cost = `(input tokens x input price + output tokens x output price) / 1,000,000 + per-request fee`,
@@ -201,6 +212,10 @@ networks (or IPv4 vs IPv6) are two identities; the browser shows "remaining" onl
 - `GET /api/models` registry counts: discoverable, executable, by provider, last refresh, and each provider's
   readiness (`ready`, `unverified`, `not_configured` with the reason, `auth_failed`), never the key.
 - `GET /api/cron/refresh-models` daily refresh (Bearer `CRON_SECRET` if set; otherwise at most hourly).
+- `GET /api/export?since=&until=&limit=&cursor=` operator export of accumulated evidence: every run with its
+  understanding, executed and skipped candidates, results, checks, costs (reserved, provider-reported, billed,
+  over-reservation) and stored replies. Raw records only, no aggregation or ranking, never the IP hash. Disabled
+  (404) unless `EXPORT_TOKEN` is set; send `Authorization: Bearer <EXPORT_TOKEN>`. Paginate with `nextCursor`.
 - `GET /health`
 
 ## Schema
@@ -216,7 +231,10 @@ Migrations in `db/migrations/` (applied in order by `npm run db:setup`, tracked 
 - Keys only in server env; nothing provider-related is in `NEXT_PUBLIC_*` or the client bundle.
 - Stored: tool name, use case, task text, task understanding, selected models, token counts, prices, costs,
   evaluation results, hashed IP. Model outputs are shown to the user and not stored.
-- Comparison data is deleted after 14 days; registry history is kept.
+- Retention (`applyRetention`): after 14 days a run keeps its measurements (task category and detected
+  constraints, models, checks, tokens, costs, labels) but its typed content is scrubbed: task text, tool name
+  and use case as typed, IP hash, model replies, full check wording, and phrases/sections/field names copied
+  from the task (`content_deleted_at` marks it). Registry history is kept.
 - Benchmarks select candidates; they are never presented as proof that a model did the user's task better.
 
 ## Local run and tests

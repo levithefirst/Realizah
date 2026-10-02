@@ -73,7 +73,8 @@ export async function runCandidate(opts: {
         errorKind: "auth",
       };
   const estimatedCostUsd = run.ok ? taskCostUsd(run.inputTokens, run.outputTokens, c.access) : null;
-  const evaluation = run.ok ? evaluate(run.text, run.finishReason, opts.understanding, { wordMax: opts.wordMaxOverride }) : null;
+  const source = opts.messages.map((m) => m.content).join("\n");
+  const evaluation = run.ok ? evaluate(run.text, run.finishReason, opts.understanding, { wordMax: opts.wordMaxOverride, source }) : null;
   const passed = Boolean(run.ok && evaluation?.passed);
   return {
     candidate: c,

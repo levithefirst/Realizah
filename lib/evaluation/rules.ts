@@ -19,6 +19,9 @@ export const RULES = {
   sections: { id: "sections.v1", appliesTo: "tasks naming sections", description: "Every named section appears." },
   must_include: { id: "must_include.v1", appliesTo: "tasks quoting required phrases", description: "Every quoted phrase appears." },
   language: { id: "language.v1", appliesTo: "tasks naming a language", description: "Written in the requested language. Not checked automatically yet." },
+  math_answer: { id: "math_answer.v1", appliesTo: "mathematics and reasoning", description: "The reply states the correct value when the task's arithmetic can be computed; otherwise not checked." },
+  extraction_values: { id: "extraction_values.v1", appliesTo: "extraction", description: "Every number, phone number, email and link in the reply appears in the task's source text." },
+  extraction_text: { id: "extraction_text.v1", appliesTo: "extraction", description: "Extracted text values appear verbatim in the source; rephrased values are not checked." },
 } as const;
 
 export type RuleKey = keyof typeof RULES;

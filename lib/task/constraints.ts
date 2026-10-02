@@ -30,7 +30,14 @@ export function extractWordCount(task: string): WordCount | null {
   let perItemMax: number | null = null;
   let phrase = "";
   const note = (m: RegExpMatchArray) => (phrase = phrase || m[0].trim());
-  const perItem = (m: RegExpMatchArray) => /^\s*(?:each|apiece|per (?:item|line|bullet|point|tagline|headline|title|idea|option|sentence))\b/i.test(t.slice((m.index ?? 0) + m[0].length));
+  const perItem = (m: RegExpMatchArray) => {
+    const after = t.slice((m.index ?? 0) + m[0].length);
+    if (/^\s*(?:each|apiece|per (?:item|line|bullet|point|tagline|headline|title|idea|option|sentence))\b/i.test(after)) return true;
+    // "Each tip under 12 words", "every bullet no more than 8 words": the
+    // item is named before the limit, within the same sentence.
+    const before = t.slice(0, m.index ?? 0).split(/[.!?;]\s/).pop() ?? "";
+    return /\b(?:each|every|per)\s+(?:[a-z-]+\s+){0,2}$/i.test(before);
+  };
 
   // Ranges: "between 150 and 200 words", "150-200 words", "150 to 200 words".
   for (const m of all(new RegExp(`\\b(?:between\\s+)?${NUM}\\s*(?:-|–|to|and)\\s*${NUM}\\s+words?\\b`, "gi"), t)) {
@@ -63,7 +70,8 @@ export function extractWordCount(task: string): WordCount | null {
     }
   }
   // Lower limits.
-  for (const m of all(new RegExp(`\\b(?:at least|minimum(?: of)?|no (?:less|fewer) than|more than|over)\\s+${NUM}\\s+words?\\b`, "gi"), t)) {
+  // "no more than 8 words" / "not over 8 words" are upper limits, not minimums.
+  for (const m of all(new RegExp(`\\b(?:at least|minimum(?: of)?|no (?:less|fewer) than|(?<!\\b(?:no|not)\\s)more than|(?<!\\b(?:no|not)\\s)over)\\s+${NUM}\\s+words?\\b`, "gi"), t)) {
     const n = toInt(m[1]);
     if (ok(n)) {
       min = Math.max(min ?? 0, /more than|over/i.test(m[0]) ? n + 1 : n);
@@ -71,7 +79,8 @@ export function extractWordCount(task: string): WordCount | null {
     }
   }
   // Targets: "a 1,000-word article", "write 500 words", "in 60 words".
-  if (min === null && max === null) {
+  // Not when the only number is a per-item limit already taken.
+  if (min === null && max === null && perItemMax === null) {
     const targetRes = [
       new RegExp(`\\b${NUM}[- ]words?\\b(?!\\s+(?:or|limit|max|cap|tops))`, "gi"),
       new RegExp(`\\b(?:write|draft|produce|give me|in|about|around|roughly|approximately|~)\\s+${NUM}\\s+words?\\b`, "gi"),
@@ -181,12 +190,24 @@ export function extractRequiredSections(text: string): string[] {
   return m ? splitList(m[1]).slice(0, 12) : [];
 }
 
+const NUMBER_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20,
+};
+const COUNT = `(\\d{1,2}|${Object.keys(NUMBER_WORDS).join("|")})`;
+const LIST_NOUNS =
+  "bullet points|bullets|items|tips|ideas|steps|reasons|examples|questions|options|names|titles|headlines|taglines|points|variations|versions|facts|ways|suggestions|benefits|mistakes|rules|lessons|strategies";
+
 export function extractListCount(text: string): number | null {
+  // "5 tips", "exactly five short tips", "a list of 7", "list 3 benefits".
   const m =
-    text.match(/\b(\d{1,2})\s+(?:bullet points|bullets|items|tips|ideas|steps|reasons|examples|questions|options|names|titles|headlines|taglines|points|variations|versions)\b/i) ??
-    text.match(/\blist of (\d{1,2})\b/i);
+    text.match(new RegExp(`\\b${COUNT}\\s+(?:[a-z-]+\\s+){0,2}?(?:${LIST_NOUNS})\\b`, "i")) ??
+    text.match(new RegExp(`\\blist of ${COUNT}\\b`, "i"));
   if (!m) return null;
-  const n = Number(m[1]);
+  let n = /^\d+$/.test(m[1]) ? Number(m[1]) : NUMBER_WORDS[m[1].toLowerCase()];
+  // "5-10 bullet points" / "3 to 5 ideas": the reply needs at least the lower bound.
+  const range = /\b(\d{1,2})\s*(?:-|–|to)\s*$/.exec(text.slice(0, m.index));
+  if (range && Number(range[1]) < n) n = Number(range[1]);
   return n >= 1 && n <= 50 ? n : null;
 }
 
@@ -198,15 +219,23 @@ export function extractMustInclude(text: string): string[] {
   return [...new Set(out)].slice(0, 10);
 }
 
+// Words after which a field list has ended and the sentence goes on:
+// "fields name, age, and city for a person who is 29 and lives in Lagos".
+const LIST_ENDS = /\s+(?:for|from|about|that|which|who|whose|where|when|based|using|describing|representing|given|named|called|so|because|if)\b/i;
+// Words that end one field name without ending the list ("price in USD").
+const ITEM_ENDS = /\s+(?:in|with|to|on|as)\b/i;
+
 export function extractRequiredFields(text: string): string[] {
   const m = text.match(/\b(?:fields?|keys?|properties|columns)\s*(?::|named|called|for|like|such as|including)?\s*([^.\n:]+)/i);
   if (!m) return [];
-  return splitList(m[1])
-    // "company for: ..." -> "company": a field name ends at a connecting word.
-    .map((f) => f.split(/\s+(?:for|from|in|of|with|about|that|which|to|based|using|on|as)\b/i)[0].trim())
-    .map((f) => f.replace(/\s+/g, "_"))
-    .filter((f) => /^[A-Za-z_][\w.-]{0,40}$/.test(f))
-    .slice(0, 20);
+  const fields: string[] = [];
+  for (const raw of splitList(m[1])) {
+    const end = LIST_ENDS.exec(raw);
+    const item = (end ? raw.slice(0, end.index) : raw).split(ITEM_ENDS)[0].trim();
+    if (item) fields.push(item.replace(/\s+/g, "_"));
+    if (end) break; // the rest of the sentence is not field names
+  }
+  return fields.filter((f) => /^[A-Za-z_][\w.-]{0,40}$/.test(f)).slice(0, 20);
 }
 
 export function extractWantsTests(text: string): boolean {

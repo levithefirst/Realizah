@@ -100,6 +100,8 @@ const RULES: [TaskCategory, number, RegExp][] = [
   ["coding", 3, /\b(typescript|javascript|python|golang|rust|java|c\+\+|c#|php|ruby|swift|kotlin|sql query|bash script|react component|next\.?js|django|express)\b/i],
   ["structured_json", 5, /\b(json|yaml|schema|structured output|key[- ]value)\b/i],
   ["extraction", 4, /\b(extract|pull out|parse|find all|list all|identify all|entities)\b/i],
+  // Reshaping given data: "Convert this list to CSV", "turn these rows into a table".
+  ["extraction", 4, /\b(?:convert|transform|reformat|restructure|turn|put)\b[^.\n]{0,80}?\b(?:into|to|as)\s+(?:a\s+|an\s+)?(?:csv|tsv|table|spreadsheet|json|yaml|xml)\b/i],
   ["summarization", 4, /\b(summari[sz]e|summary|tl;?dr|recap|condense|key points|key takeaways)\b/i],
   ["mathematics", 4, /\b(solve|equation|integral|derivative|prove that|probability|arithmetic|algebra|calculus|math)\b|\d+\s*[\^*/+-]\s*\d+\s*=/i],
   // A bare arithmetic expression ("17*19", "3.5 × 4", "2^10", "120 / 8 + 3")
@@ -108,6 +110,9 @@ const RULES: [TaskCategory, number, RegExp][] = [
   // asks; * x × ÷ ^ between numbers count anywhere.
   ["mathematics", 4, /\d(?:[\d.,]*\d)?\s*[*×÷^]\s*\(?-?\d|\b(?:what(?:'s| is)|calculate|compute|evaluate|how much is)\s+\(?-?\d[\d.,]*\s*(?:[-+*/×÷^x]|times|plus|minus|divided by)\s*\(?-?\d|\b(?:calculate|compute)\b|\b(?:square root|cube root|factorial|percent(?:age)? of|multiply|divided by)\b/i],
   ["reasoning", 3, /\b(logic puzzle|riddle|reason (?:about|through)|step[- ]by[- ]step|deduce|which (?:option|answer) is (?:correct|true)|chain of thought)\b/i],
+  // A quantitative question to work out: "How much does the ball cost?",
+  // "how many days until...?" — a question, not a request to write.
+  ["reasoning", 3, /\b(?:how (?:much|many|long|old|far|fast)|what (?:time|day|age)|who (?:is|was) (?:older|taller|faster|right))\b[^?.!]*\?|\b(?:brain ?teaser|trick question|word problem)\b/i],
   ["research", 4, /\b(research|find sources|cite|citations?|references|literature review|what does the (?:research|evidence) say|market research|competitor research)\b/i],
   ["analysis", 3, /\b(analy[sz]e|analysis|evaluate|assess|compare|pros and cons|swot|insights|trends|critique)\b/i],
   ["writing", 4, /\b(?:write|draft|compose|rewrite|edit|proofread|polish)\b(?:\s+\w+){0,4}?\s+(?:article|blog|post|essay|email|letter|story|copy|caption|tweet|thread|newsletter|speech|script|bio|description|headline|ad|press release|cover letter|poem|lyrics|report|proposal|summary|outline|message|reply|review)s?\b/i],

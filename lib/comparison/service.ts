@@ -19,7 +19,7 @@ import { buildMessages, type CandidateOutcome } from "./execute";
 import { billedCostUsd } from "./billing";
 import { loadRouteBillingHistory } from "./billingHistory";
 import { describeOverrun, isLabelEligible, labelOutcomes, runProgressive, systemicFailure, type BillingOverrun } from "./progressive";
-import type { Check } from "../evaluation/evaluate";
+import { contentFreeChecks, type Check } from "../evaluation/evaluate";
 import { comparisonSummary } from "./summary";
 
 export type ComparisonInput = {
@@ -90,6 +90,13 @@ export type ResultDTO = {
   labelEligible: boolean;
   estimatedCostUsd: number | null;
   worstCaseCostUsd: number;
+  // Billing audit, as stored in comparison_results: what the call reserved
+  // against the cap, what the provider reported, what was billed (the higher
+  // of the two cost views) and whether it billed above the reservation.
+  reservedCostUsd: number;
+  providerReportedCostUsd: number | null;
+  billedCostUsd: number;
+  overReservation: boolean;
   costPerSuccessUsd: number | null;
   latencyMs: number | null;
   inputTokens: number | null;
@@ -265,6 +272,42 @@ export async function planComparison(input: ComparisonInput, opts: { adapters?: 
   };
 }
 
+// Model replies are stored up to this length (the reply shown is never cut).
+export const MAX_STORED_OUTPUT_CHARS = 20_000;
+export const RETENTION_DAYS = 14;
+
+// Content retention. After RETENTION_DAYS a run keeps its measurements (task
+// category and detected constraints, models, checks, tokens, costs, labels)
+// but loses everything a person typed or a model wrote: task text, tool name,
+// use case, IP hash, model replies, and the quoted phrases, section names and
+// field names copied from the task into its understanding. Results and
+// candidates are immutable and hold no free text of their own beyond check
+// details. Idempotent: scrubbed runs are marked and skipped.
+export async function applyRetention(days = RETENTION_DAYS): Promise<void> {
+  const d = Math.max(1, Math.floor(days));
+  await db().query(
+    `delete from comparison_outputs where created_at < now() - interval '${d} days';
+     update comparison_runs
+        set task_text = '', ai_tool_input = '', use_case = '', ip_hash = null,
+            task_understanding = case
+              when jsonb_typeof(task_understanding->'constraints') = 'object' then
+                jsonb_set(task_understanding, '{constraints}',
+                  (task_understanding->'constraints')
+                    || '{"mustInclude": [], "requiredSections": [], "requiredFields": []}'::jsonb
+                    || case when jsonb_typeof(task_understanding->'constraints'->'wordCount') = 'object'
+                            then jsonb_build_object('wordCount', (task_understanding->'constraints'->'wordCount') || '{"phrase": ""}'::jsonb)
+                            else '{}'::jsonb end)
+              else task_understanding end,
+            -- An unrecognised tool's name is what the person typed.
+            baseline = case when baseline->>'productSlug' is null then baseline || '{"product": "", "message": ""}'::jsonb else baseline end,
+            content_deleted_at = now()
+      where content_deleted_at is null and created_at < now() - interval '${d} days';
+     delete from runs where created_at < now() - interval '${d} days';
+     delete from audit_events where created_at < now() - interval '${d} days';
+     delete from rate_limits where window_start < now() - interval '2 days';`
+  );
+}
+
 function failureReason(o: CandidateOutcome): string | null {
   if (!o.run.ok) return o.run.error ?? "call failed";
   const failed = o.evaluation?.checks.filter((c) => c.status === "fail") ?? [];
@@ -398,11 +441,15 @@ export async function runComparison(
       const c = o.candidate;
       const candidateId = await insertCandidate(c, "executed", o.stage, null);
       const isEligible = isLabelEligible(o);
-      await client.query(
+      // What the runner reserved for this call (free screening reserves $0).
+      const reservedUsd = c.role === "free_screening" ? 0 : c.worstCaseCostUsd;
+      const billedUsd = billedCostUsd(o);
+      const overReservation = progress.ledger.overruns.some((x) => x.accessId === c.access.accessId);
+      const resultRow = await client.query<{ id: string }>(
         `insert into comparison_results (run_id, candidate_id, executed, passed, input_tokens, output_tokens, total_tokens,
            input_usd_per_1m, output_usd_per_1m, estimated_cost_usd, provider_reported_cost_usd, cost_per_success_usd,
            latency_ms, finish_reason, evaluation, error, reserved_cost_usd, billed_cost_usd, over_reservation)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) returning id`,
         [
           runId,
           candidateId,
@@ -418,14 +465,22 @@ export async function runComparison(
           isEligible ? o.costPerSuccessUsd : null,
           o.run.latencyMs,
           o.run.finishReason,
-          JSON.stringify(o.evaluation?.checks ?? []),
+          // Permanent: content-free check details (full wording below).
+          JSON.stringify(contentFreeChecks(o.evaluation?.checks ?? [])),
           o.run.error,
-          // What the runner reserved for this call (free screening reserves $0).
-          c.role === "free_screening" ? 0 : c.worstCaseCostUsd,
-          billedCostUsd(o),
-          progress.ledger.overruns.some((x) => x.accessId === c.access.accessId),
+          reservedUsd,
+          billedUsd,
+          overReservation,
         ]
       );
+      // Content kept with the evidence until retention removes it: the reply
+      // and the full wording of its checks.
+      await client.query(`insert into comparison_outputs (result_id, run_id, output_text, checks) values ($1, $2, $3, $4)`, [
+        resultRow.rows[0].id,
+        runId,
+        o.run.text.slice(0, MAX_STORED_OUTPUT_CHARS),
+        JSON.stringify(o.evaluation?.checks ?? []),
+      ]);
       const budget = input.budgetUsd !== null && isEligible ? budgetLine(input.budgetUsd, o) : null;
       if (budget) {
         await client.query(
@@ -461,6 +516,10 @@ export async function runComparison(
         labelEligible: isEligible,
         estimatedCostUsd: o.estimatedCostUsd,
         worstCaseCostUsd: c.worstCaseCostUsd,
+        reservedCostUsd: reservedUsd,
+        providerReportedCostUsd: o.run.providerReportedCostUsd,
+        billedCostUsd: billedUsd,
+        overReservation,
         costPerSuccessUsd: isEligible ? o.costPerSuccessUsd : null,
         latencyMs: o.run.latencyMs,
         inputTokens: o.run.inputTokens,
@@ -498,15 +557,9 @@ export async function runComparison(
       .catch(() => {});
   }
 
-  // 14-day retention for comparison data, as the privacy page states.
-  db()
-    .query(
-      `delete from comparison_runs where created_at < now() - interval '14 days';
-       delete from runs where created_at < now() - interval '14 days';
-       delete from audit_events where created_at < now() - interval '14 days';
-       delete from rate_limits where window_start < now() - interval '2 days';`
-    )
-    .catch(() => {});
+  // Retention, as the privacy page states: what people typed, model replies
+  // and the IP hash go after RETENTION_DAYS; anonymous measurements stay.
+  applyRetention().catch(() => {});
 
   // Paid results first in execution order, then screening runs.
   results.sort((a, b) => Number(b.labelEligible) - Number(a.labelEligible) || a.stage - b.stage);
