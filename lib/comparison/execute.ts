@@ -17,9 +17,16 @@ export type CandidateOutcome = {
 };
 
 // The prompt every candidate receives: the user's task, unchanged, as the
-// only message. No per-model rewriting.
-export function buildMessages(task: string): ChatMessage[] {
-  return [{ role: "user", content: task }];
+// only message. No per-model rewriting. The one addition: a word limit the
+// user set explicitly (wordMax) is stated after the task, because every
+// reply is judged against it and a model can't meet a limit it isn't told.
+export function wordLimitInstruction(wordMax: number): string {
+  return `Keep the response to ${wordMax} ${wordMax === 1 ? "word" : "words"} or fewer.`;
+}
+
+export function buildMessages(task: string, wordMax?: number | null): ChatMessage[] {
+  const content = wordMax == null ? task : `${task}\n\n${wordLimitInstruction(wordMax)}`;
+  return [{ role: "user", content }];
 }
 
 async function pool<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {

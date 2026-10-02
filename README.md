@@ -110,15 +110,25 @@ Everything below happens before or between model calls; none of it changes the d
   `MAX_CANDIDATES_PER_RUN` (10).
 - **Free tiers never get labels.** Free endpoints are rate-limited and not a stable price; their results are
   shown as screening runs. Screening alone never ends a comparison, and labels need at least two paid runs.
-- **Hard cap**: a paid call launches only if actual spend + in-flight worst-case reservations + its own worst
-  case fit `MAX_EXECUTION_COST_USD`. Worst case = UTF-8 bytes of the task (no byte-level tokenizer produces
-  more tokens than bytes) + message overhead, plus the call's max output tokens, at its price snapshot. A
-  timed-out call is charged its worst case. If any call ever bills above its reserved bound, launching stops.
+- **Hard cap**: a paid call launches only if spend so far + in-flight reservations + its own reservation fit
+  `MAX_EXECUTION_COST_USD`, so no call is ever knowingly launched whose reservation exceeds what is left.
+  Worst case = UTF-8 bytes of the task + message overhead, plus the call's max output tokens, at its price
+  snapshot. A timed-out call is charged at least its worst case.
+- **Route-level billing safety** (`lib/comparison/billing.ts`): some routes bill more than that bound (in
+  production, OpenRouter's `openai/gpt-6.1-sol-pro` billed ~1,800 hidden input tokens for an 11-word prompt and
+  455 output tokens against `max_tokens` 198: $0.008236 against $0.002116 reserved). After every call the
+  billed cost (provider-reported, never below the token cost) is compared with the reservation; an overrun is
+  stored (`comparison_results.over_reservation`, `reserved_cost_usd`, `billed_cost_usd`), the route is unsafe
+  for the rest of the comparison, and other routes keep running. In later plans a route with an overrun in the
+  last 7 days reserves its observed overrun ratio x1.25, so the normal per-model and run caps decide whether
+  it still fits; after 7 days it plans normally again. A free route that billed leaves screening. Cost
+  control is checked before "meaningful", and an overrun is always named in the stop reason.
 - **Interactive only**: comparisons are synchronous chat-completions calls. Access paths with another
   execution class (OpenRouter's `:batch` SKUs, `lib/registry/execution.ts`) are access paths of their model,
   never candidates; a model with both a batch and a realtime route competes on the realtime one.
 - **`wordMax`**: an explicit word limit replaces the task's own word constraint before planning, so it sets the
-  output ceiling, selection, every call's max tokens and evaluation (e.g. `wordMax=30` -> 106 tokens).
+  output ceiling, selection, every call's max tokens and evaluation (e.g. `wordMax=30` -> 106 tokens), and it is
+  stated to every model after the task.
 - **Systemic failures stop early**: once a provider has rejected its credentials (HTTP 401), or failed at least
   twice with the same auth/network error and never succeeded, nothing more is launched on it. Ordinary
   per-model failures (a 403 on one gated model, a bad request, a timeout) never trigger this.
@@ -128,7 +138,8 @@ Everything below happens before or between model calls; none of it changes the d
 ## Same task, same input
 
 Every candidate receives one user message containing the task exactly as typed: no rewriting, no wrapper, no
-fixture. The only per-model differences are execution requirements: reasoning-capable models get extra output
+fixture. The one addition: when the user sets `wordMax`, the line "Keep the response to N words or fewer." is
+appended after the task, because every reply is judged against that limit. The only per-model differences are execution requirements: reasoning-capable models get extra output
 token headroom for their hidden reasoning, and each adapter uses its provider's parameter names.
 
 ## Evaluation

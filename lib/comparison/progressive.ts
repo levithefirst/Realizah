@@ -19,32 +19,64 @@
 // failures (a 403 on one gated model, a bad request, a timeout) never do.
 //
 // Spend: before launching a paid call, actual spend + in-flight worst-case
-// reservations + this call's worst case must fit MAX_EXECUTION_COST_USD.
-// Worst case = byte-level input bound + the call's max output tokens. A
-// timed-out call is charged its worst case (the provider may still bill it).
+// reservations + this call's worst case must fit MAX_EXECUTION_COST_USD, so
+// no call is ever launched whose reservation exceeds what is left of the cap.
+// Worst case = byte-level input bound + the call's max output tokens, raised
+// for routes that recently billed above it (comparison/billing.ts). A
+// timed-out call is charged at least its worst case.
+//
+// Billing safety, after every call, in this order: (1) the call returns,
+// (2) its billed cost is taken (provider-reported, never below the token
+// cost), (3) it is compared with the reservation, (4) an overrun is recorded
+// and the route marked unsafe for the rest of the comparison, (5) cost
+// control decides whether anything more may launch, and only then (6) is the
+// comparison checked for being meaningful. Other routes keep running: one
+// route's overrun is not a reason to stop the others. Any overrun is named in
+// the stop reason.
 import type { ExecutionLimits } from "../config";
 import type { ChatMessage, ProviderAdapter, RunModelResult } from "../providers/types";
 import { isFreeAccess, type Candidate, type PriceTier, type SelectionResult } from "../selection/select";
 import type { TaskUnderstanding } from "../task/understand";
+import { billedCostUsd, isOverReservation } from "./billing";
 import { runCandidate, type CandidateOutcome } from "./execute";
 
 export const EXPANSION_WAVE_SIZE = 2;
 const EPS = 1e-12;
 
-export type SkipKind = "budget" | "meaningful" | "candidate_limit" | "spend_anomaly" | "provider_failure";
+export type SkipKind = "budget" | "meaningful" | "candidate_limit" | "unsafe_route" | "provider_failure";
 export type StagedOutcome = CandidateOutcome & { stage: number };
 export type Skipped = { candidate: Candidate; kind: SkipKind; reason: string };
 
 export type Ledger = {
   capUsd: number;
-  // Known cost of completed calls.
+  // Billed cost of completed calls.
   actualUsd: number;
-  // Known cost plus worst case for timed-out calls: what the cap is held to.
+  // Billed cost, and at least the worst case for timed-out calls: what the cap is held to.
   chargedUsd: number;
-  // Highest actual + in-flight reservation ever reached (always <= cap).
+  // Highest charged + in-flight reservation reached when launching (<= cap).
   peakCommittedUsd: number;
-  anomaly: string | null;
+  // Calls that billed above their reservation.
+  overruns: BillingOverrun[];
 };
+
+export type BillingOverrun = {
+  slug: string;
+  accessId: string;
+  providerId: string;
+  externalModelId: string;
+  reservedUsd: number;
+  billedUsd: number;
+  // billed / reserved; Infinity when the route reserved $0 (a free route).
+  ratio: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  maxOutputTokens: number;
+};
+
+export function describeOverrun(o: BillingOverrun): string {
+  const ratio = Number.isFinite(o.ratio) ? ` (${Math.round(o.ratio * 10) / 10}x)` : "";
+  return `${o.slug} via ${o.providerId} billed $${o.billedUsd.toPrecision(3)} against $${o.reservedUsd.toPrecision(3)} reserved${ratio}`;
+}
 
 export type ProgressiveResult = {
   outcomes: StagedOutcome[];
@@ -96,7 +128,9 @@ export async function runProgressive(opts: {
 }): Promise<ProgressiveResult> {
   const { selection, limits } = opts;
   const cap = limits.maxExecutionCostUsd;
-  const ledger: Ledger = { capUsd: cap, actualUsd: 0, chargedUsd: 0, peakCommittedUsd: 0, anomaly: null };
+  const ledger: Ledger = { capUsd: cap, actualUsd: 0, chargedUsd: 0, peakCommittedUsd: 0, overruns: [] };
+  // Routes that billed above their reservation in this comparison.
+  const unsafeRoutes = new Set<string>();
   const outcomes: StagedOutcome[] = [];
   const skipped: Skipped[] = [];
   let reserved = 0;
@@ -145,12 +179,24 @@ export async function runProgressive(opts: {
       }).then((o) => {
         reserved -= hold;
         record(c.access.providerId, o.run);
-        const known = o.estimatedCostUsd ?? 0;
-        const charged = o.run.errorKind === "timeout" ? hold : known;
-        ledger.actualUsd += known;
-        ledger.chargedUsd += charged;
-        if (paid && known > hold + EPS) {
-          ledger.anomaly = `${c.model.slug} cost ${known} above its reserved worst case ${hold}`;
+        // (2) what was billed, (3) against the reservation, (4) recorded.
+        const billed = billedCostUsd(o);
+        ledger.actualUsd += billed;
+        ledger.chargedUsd += o.run.errorKind === "timeout" ? Math.max(hold, billed) : billed;
+        if (isOverReservation(billed, hold)) {
+          unsafeRoutes.add(c.access.accessId);
+          ledger.overruns.push({
+            slug: c.model.slug,
+            accessId: c.access.accessId,
+            providerId: c.access.providerId,
+            externalModelId: c.access.externalModelId,
+            reservedUsd: hold,
+            billedUsd: billed,
+            ratio: hold > 0 ? billed / hold : Infinity,
+            inputTokens: o.run.inputTokens,
+            outputTokens: o.run.outputTokens,
+            maxOutputTokens: c.maxOutputTokens,
+          });
         }
         outcomes.push({ ...o, stage });
         running.delete(p);
@@ -162,8 +208,8 @@ export async function runProgressive(opts: {
       for (let i = 0; i < pending.length && running.size < limits.maxConcurrent; ) {
         const c = pending[i];
         const paid = c.role !== "free_screening";
-        if (ledger.anomaly) {
-          skip(c, "spend_anomaly", "Stopped: a call cost more than its reserved worst case.");
+        if (unsafeRoutes.has(c.access.accessId)) {
+          skip(c, "unsafe_route", "Not run: this route billed above its reservation earlier in this comparison.");
           pending.splice(i, 1);
           continue;
         }
@@ -207,16 +253,32 @@ export async function runProgressive(opts: {
   // Waves 2+: expansion until meaningful, the limit, or the cap.
   let stage = 2;
   let stopReason = "";
+  // (5) Cost control decides before anything else whether more may launch.
+  const costControlStop = (): string | null => {
+    const overrun = ledger.overruns.map(describeOverrun).join("; ");
+    if (ledger.chargedUsd > cap + EPS) {
+      return `Stopped by cost control: billing reached $${ledger.chargedUsd.toPrecision(3)}, above the $${cap} cap${overrun ? `, because ${overrun}` : ""}.`;
+    }
+    if (ledger.overruns.length && remaining.length) {
+      const left = cap - ledger.chargedUsd;
+      const fits = remaining.some((c) => !unsafeRoutes.has(c.access.accessId) && c.worstCaseCostUsd <= left + EPS);
+      if (!fits) return `Stopped by cost control: ${overrun}, and the $${Math.max(0, left).toPrecision(2)} left of the $${cap} cap can't cover any remaining model's reservation.`;
+    }
+    return null;
+  };
   for (;;) {
+    const costStop = costControlStop();
+    if (costStop) {
+      stopReason = costStop;
+      for (const c of remaining) skip(c, "budget", "Not run: cost control stopped the comparison.");
+      remaining.length = 0;
+      break;
+    }
+    // (6) Only then: is the comparison already meaningful?
     const m = meaningfulness(outcomes, selection, limits.minCandidates);
     if (m.meaningful) {
       stopReason = `Meaningful comparison reached: ${m.paid} paid models, ${m.passes} passed, all price tiers, ${m.creators} creators.`;
       for (const c of remaining) skip(c, "meaningful", "Not needed: the comparison was already meaningful.");
-      break;
-    }
-    if (ledger.anomaly) {
-      stopReason = `Stopped for safety: ${ledger.anomaly}.`;
-      for (const c of remaining) skip(c, "spend_anomaly", "Stopped: a call cost more than its reserved worst case.");
       break;
     }
     // Drop everything queued on a provider that is down.
@@ -260,6 +322,10 @@ export async function runProgressive(opts: {
 
   const final = meaningfulness(outcomes, selection, limits.minCandidates);
   if (!stopReason) stopReason = final.meaningful ? "Meaningful comparison reached." : "Stopped.";
+  // A billing overrun is always named, whatever ended the comparison.
+  if (ledger.overruns.length && !stopReason.startsWith("Stopped by cost control")) {
+    stopReason += ` Cost control: ${ledger.overruns.map(describeOverrun).join("; ")}; route marked unsafe for this comparison.`;
+  }
   const providerFailures = [...history.keys()].map(providerDown).filter((f): f is ProviderFailure => f !== null);
   return { outcomes, skipped, ledger, stopReason, meaningful: final.meaningful, paidAttempted: final.paid, providerFailures };
 }

@@ -78,3 +78,13 @@ test("input parsing keeps wordMax for planning", () => {
   const r = parseComparisonInput({ tool: "ChatGPT", useCase: "writing", task: ESSAY, wordMax: "30" });
   assert.ok(r.ok && r.input.wordMaxOverride === 30);
 });
+
+test("wordMax is stated to the model after the unchanged task; without it the task is sent as typed", () => {
+  const task = "Explain the benefits of remote work for small teams.";
+  assert.deepEqual(buildMessages(task, 25), [{ role: "user", content: `${task}\n\nKeep the response to 25 words or fewer.` }]);
+  assert.deepEqual(buildMessages(task, 1), [{ role: "user", content: `${task}\n\nKeep the response to 1 word or fewer.` }]);
+  assert.deepEqual(buildMessages(task), [{ role: "user", content: task }]);
+  assert.deepEqual(buildMessages(task, null), [{ role: "user", content: task }]);
+  const messy = "  write it\n\n(no limit stated)  ";
+  assert.ok(buildMessages(messy, 10)[0].content.startsWith(messy), "the task text itself is never trimmed or rewritten");
+});

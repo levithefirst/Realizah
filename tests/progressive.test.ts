@@ -96,13 +96,13 @@ test("hard spend cap: never exceeded even when every call bills its absolute wor
     const { res, calls } = await run((req) => ({ text: FAIL, inputTokens: worstCaseInputTokens(TASK), outputTokens: req.maxTokens }), limits);
     assert.ok(res.ledger.chargedUsd <= cap + 1e-12, `charged ${res.ledger.chargedUsd} > cap ${cap}`);
     assert.ok(res.ledger.peakCommittedUsd <= cap + 1e-12, `peak ${res.ledger.peakCommittedUsd} > cap ${cap}`);
-    assert.equal(res.ledger.anomaly, null);
+    assert.equal(res.ledger.overruns.length, 0);
     assert.equal(calls.length, res.outcomes.length);
     if (cap < 0.03) assert.ok(res.skipped.some((s) => s.kind === "budget"), `cap ${cap}: expected budget skips`);
   }
 });
 
-test("timeouts are charged their worst case; an over-bound bill stops further launches", async () => {
+test("timeouts are charged their worst case; an over-bound bill that breaks the cap stops further launches", async () => {
   const limits = { ...DEFAULT_LIMITS, maxConcurrent: 1 };
   const timed = await run(() => ({ ok: false, text: "", inputTokens: null, outputTokens: null, errorKind: "timeout", error: "timed out" }), limits);
   const worst = timed.res.outcomes.filter(isLabelEligible).reduce((s, o) => s + o.candidate.worstCaseCostUsd, 0);
@@ -110,10 +110,11 @@ test("timeouts are charged their worst case; an over-bound bill stops further la
   assert.ok(Math.abs(timed.res.ledger.chargedUsd - worst) < 1e-12);
 
   const over = await run(() => ({ inputTokens: 10_000_000, outputTokens: 10 }), limits);
-  assert.ok(over.res.ledger.anomaly);
-  assert.ok(over.res.skipped.some((s) => s.kind === "spend_anomaly"));
+  assert.ok(over.res.ledger.overruns.length >= 1);
+  assert.match(over.res.stopReason, /^Stopped by cost control/);
+  assert.ok(over.res.skipped.some((s) => s.kind === "budget"));
   const paidCalls = over.calls.filter((c) => !c.externalModelId.endsWith(":free"));
-  assert.equal(paidCalls.length, 1, "no paid call launches after the anomaly");
+  assert.equal(paidCalls.length, 1, "no paid call launches once billing broke the cap");
 });
 
 test("zero budget: nothing runs and nothing is spent", async () => {

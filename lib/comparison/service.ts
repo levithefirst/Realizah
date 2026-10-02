@@ -16,7 +16,9 @@ import { lastRefresh, refreshRegistry } from "../registry/refresh";
 import { selectCandidates, type Candidate, type CandidateRole, type PriceTier, type SelectionResult } from "../selection/select";
 import { applyWordMaxOverride, understandTask, type TaskUnderstanding } from "../task/understand";
 import { buildMessages, type CandidateOutcome } from "./execute";
-import { isLabelEligible, labelOutcomes, runProgressive, systemicFailure } from "./progressive";
+import { billedCostUsd } from "./billing";
+import { loadRouteBillingHistory } from "./billingHistory";
+import { describeOverrun, isLabelEligible, labelOutcomes, runProgressive, systemicFailure, type BillingOverrun } from "./progressive";
 import type { Check } from "../evaluation/evaluate";
 import { comparisonSummary } from "./summary";
 
@@ -129,6 +131,8 @@ export type ComparisonDTO = {
   // Set when no model returned a reply for reasons outside the user's task
   // (provider auth, network, timeouts). Such a run doesn't use a free comparison.
   systemicFailure: string | null;
+  // Calls that billed above what they reserved against the cap.
+  billingOverruns: (Omit<BillingOverrun, "ratio"> & { ratio: number | null; detail: string })[];
   budgetUsd: number | null;
   executionBudgetUsd: number;
   estimatedExecutionCostUsd: number;
@@ -214,7 +218,7 @@ export async function planComparison(input: ComparisonInput, opts: { adapters?: 
   }
 
   await ensureRegistry();
-  const [registry, stats] = await Promise.all([loadRegistry(), registryStats()]);
+  const [registry, stats, billingHistory] = await Promise.all([loadRegistry(), registryStats(), loadRouteBillingHistory()]);
   const selection = selectCandidates({
     registry,
     understanding,
@@ -222,6 +226,7 @@ export async function planComparison(input: ComparisonInput, opts: { adapters?: 
     limits,
     userBudgetUsd: input.budgetUsd,
     taskText: input.task,
+    billingHistory,
   });
 
   let reason: string | null = null;
@@ -276,7 +281,7 @@ export async function runComparison(
 ): Promise<ComparisonDTO> {
   const limits = executionLimits();
   const adapters = adaptersIn ?? (await providerReadiness({ verify: false })).ready;
-  const messages = buildMessages(input.task);
+  const messages = buildMessages(input.task, input.wordMaxOverride);
   const progress = await runProgressive({ selection, messages, adapters, understanding, limits, wordMaxOverride: input.wordMaxOverride });
   const outcomes = progress.outcomes;
   const eligible = outcomes.filter(isLabelEligible);
@@ -338,7 +343,8 @@ export async function runComparison(
         refresh?.id ?? null,
         labels.cheaper,
         labels.better,
-        outcomes.some((o) => !o.run.ok) || progress.skipped.some((x) => x.kind === "budget") ? "partial" : "complete",
+        // About the paid comparison: a failed free screening run doesn't make it partial.
+        eligible.some((o) => !o.run.ok) || progress.skipped.some((x) => x.kind === "budget" || x.kind === "unsafe_route") ? "partial" : "complete",
         ipHash,
         selection.considered,
         JSON.stringify(selection.excluded),
@@ -395,8 +401,8 @@ export async function runComparison(
       await client.query(
         `insert into comparison_results (run_id, candidate_id, executed, passed, input_tokens, output_tokens, total_tokens,
            input_usd_per_1m, output_usd_per_1m, estimated_cost_usd, provider_reported_cost_usd, cost_per_success_usd,
-           latency_ms, finish_reason, evaluation, error)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+           latency_ms, finish_reason, evaluation, error, reserved_cost_usd, billed_cost_usd, over_reservation)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
         [
           runId,
           candidateId,
@@ -414,6 +420,10 @@ export async function runComparison(
           o.run.finishReason,
           JSON.stringify(o.evaluation?.checks ?? []),
           o.run.error,
+          // What the runner reserved for this call (free screening reserves $0).
+          c.role === "free_screening" ? 0 : c.worstCaseCostUsd,
+          billedCostUsd(o),
+          progress.ledger.overruns.some((x) => x.accessId === c.access.accessId),
         ]
       );
       const budget = input.budgetUsd !== null && isEligible ? budgetLine(input.budgetUsd, o) : null;
@@ -529,6 +539,7 @@ export async function runComparison(
     stopReason: progress.stopReason,
     labelsWithheld: labels.withheld,
     systemicFailure: systemic,
+    billingOverruns: progress.ledger.overruns.map((o) => ({ ...o, ratio: Number.isFinite(o.ratio) ? o.ratio : null, detail: describeOverrun(o) })),
     budgetUsd: input.budgetUsd,
     executionBudgetUsd: limits.maxExecutionCostUsd,
     estimatedExecutionCostUsd: selection.estimatedExecutionCostUsd,

@@ -6,7 +6,8 @@
 // 2. Access       configured provider, interactive (not :batch), known price,
 //                 not a known-incompatible id
 // 3. Cost         worst case per model within MAX_COST_PER_CANDIDATE_USD and the
-//                 run cap; then the user's per-task budget
+//                 run cap (raised for routes that recently billed above it);
+//                 then the user's per-task budget
 // 4. Relevance    task-relevant benchmark, verified capabilities, freshness
 //                 (signals only; nothing is ranked as a winner)
 // 5. Dedupe       one model per family (dated snapshots, variants)
@@ -18,6 +19,7 @@
 // Pure: no database, no env, no network.
 import type { ExecutionLimits } from "../config";
 import { isInteractive } from "../registry/execution";
+import { reservationFactor, type RouteBillingHistory } from "../comparison/billing";
 import { expectedInputTokens, taskCostUsd, worstCaseCostUsd, worstCaseInputTokens } from "../pricing";
 import type { RegistryAccess, RegistryModel } from "../registry/types";
 import { expectedOutputTokens, outputBudget, outputTokensFor } from "../task/outputBudget";
@@ -30,8 +32,11 @@ export type Candidate = {
   model: RegistryModel;
   access: RegistryAccess;
   maxOutputTokens: number;
+  // What the call reserves against the cap. For a route that recently billed
+  // above its bound this is the base worst case x reservationFactor.
   worstCaseCostUsd: number;
   expectedCostUsd: number;
+  reservationFactor: number;
   relevance: number;
   rank: number;
   role: CandidateRole;
@@ -104,6 +109,7 @@ type Scored = {
   maxOut: number;
   worst: number;
   expected: number;
+  factor: number;
   score: number;
   reasons: string[];
 };
@@ -116,6 +122,8 @@ export function selectCandidates(opts: {
   userBudgetUsd?: number | null;
   // The exact task text, for the byte-level input bound.
   taskText?: string;
+  // Recent billing overruns by access id (comparison/billing.ts).
+  billingHistory?: ReadonlyMap<string, RouteBillingHistory>;
   now?: Date;
 }): SelectionResult {
   const { understanding: u, limits } = opts;
@@ -174,8 +182,10 @@ export function selectCandidates(opts: {
       continue;
     }
     for (const a of usable.filter(isFreeAccess)) {
+      // A free route that has billed reserves $0 yet costs money: unsafe.
+      if (opts.billingHistory?.has(a.accessId)) continue;
       if (a.priceStatus !== "unknown" && a.inputUsdPer1m === 0 && a.outputUsdPer1m === 0) {
-        freeOptions.push({ m, access: a, maxOut, worst: 0, expected: 0 });
+        freeOptions.push({ m, access: a, maxOut, worst: 0, expected: 0, factor: 1 });
       }
     }
     const paidPaths = usable.filter((a) => !isFreeAccess(a) && a.priceStatus !== "unknown");
@@ -185,12 +195,17 @@ export function selectCandidates(opts: {
     }
     let best: Omit<Scored, "score" | "reasons"> | null = null;
     for (const a of paidPaths) {
-      const worst = worstCaseCostUsd(worstIn, maxOut, a);
-      if (worst === null) continue;
-      const expected = taskCostUsd(expectedIn, expectedOutputTokens(u, maxOut), a) ?? worst;
+      const base = worstCaseCostUsd(worstIn, maxOut, a);
+      if (base === null) continue;
+      // A route that recently billed above its bound reserves what it was
+      // seen to bill (plus margin); a clean route of the same model wins.
+      const history = opts.billingHistory?.get(a.accessId);
+      const factor = reservationFactor(history);
+      const worst = base * factor;
+      const expected = (taskCostUsd(expectedIn, expectedOutputTokens(u, maxOut), a) ?? base) * Math.max(1, history?.maxRatio ?? 1);
       const better =
         !best || worst < best.worst - 1e-12 || (Math.abs(worst - best.worst) <= 1e-12 && best.access.providerId === "openrouter" && a.providerId !== "openrouter");
-      if (better) best = { m, access: a, maxOut, worst, expected };
+      if (better) best = { m, access: a, maxOut, worst, expected, factor };
     }
     if (!best) {
       count(excluded, "price_unknown");
@@ -309,6 +324,7 @@ export function selectCandidates(opts: {
     maxOutputTokens: p.maxOut,
     worstCaseCostUsd: p.worst,
     expectedCostUsd: p.expected,
+    reservationFactor: p.factor,
     relevance: Math.round(p.score * 1000) / 1000,
     rank,
     role,
@@ -317,6 +333,7 @@ export function selectCandidates(opts: {
       `${u.outputModality} output`,
       `${tier} price tier`,
       ...p.reasons,
+      ...(p.factor > 1 ? [`reserves ${Math.round(p.factor * 10) / 10}x its worst case after billing above it recently`] : []),
       tier === "free" ? `free tier via ${p.access.providerId}` : `$${p.access.inputUsdPer1m}/$${p.access.outputUsdPer1m} per 1M via ${p.access.providerId}`,
     ].join("; "),
   });
