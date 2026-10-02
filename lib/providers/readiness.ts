@@ -62,7 +62,9 @@ export async function providerReadiness(
       if (!e && opts.verify && a.checkAuth) e = await probe(a, now);
       const checkedAt = e ? new Date(e.at).toISOString() : null;
       if (e?.check.state === "auth_failed") {
-        return { provider: a.id, state: "auth_failed", detail: `The provider rejected the API key${e.check.detail ? `: ${e.check.detail}` : "."}`, checkedAt };
+        const shape = a.credentialShape?.();
+        const detail = `The provider rejected the API key${e.check.detail ? `: ${e.check.detail}` : ""}.${shape ? ` Key ${shape}.` : ""}`;
+        return { provider: a.id, state: "auth_failed", detail, checkedAt };
       }
       ok.add(a.id);
       return e?.check.state === "ok"

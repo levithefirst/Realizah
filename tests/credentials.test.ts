@@ -80,3 +80,11 @@ test("no key reaches stored errors or logs", () => {
   assert.ok(!redact(`connect to postgres://user:pw@host/db failed`).includes("pw@"));
   assert.ok(!redact(`Incorrect API key provided: ${KEY}`).includes(KEY));
 });
+
+test("keyShape describes the key's format without revealing it", async () => {
+  const { keyShape } = await import("../lib/providers/credentials");
+  assert.equal(keyShape(KEY), `starts with "sk-or-v1-", ${KEY.length} characters`);
+  assert.equal(keyShape("sk-proj-abcdefghijklmnop"), 'starts with "sk-proj-", 24 characters');
+  assert.equal(keyShape("abcdef123456"), "no known key prefix, 12 characters");
+  assert.ok(!keyShape(KEY).includes("0123456789abcdef"));
+});

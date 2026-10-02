@@ -41,6 +41,8 @@ export interface ProviderAdapter {
   isConfigured(): boolean;
   // Why the provider is not configured, without the key itself.
   configIssue?(): string | null;
+  // Non-secret shape of the key (format family, length) for diagnostics.
+  credentialShape?(): string | null;
   checkAuth?(): Promise<AuthCheck>;
   run(req: RunModelRequest): Promise<RunModelResult>;
 }

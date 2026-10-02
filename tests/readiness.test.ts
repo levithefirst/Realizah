@@ -11,6 +11,7 @@ function fake(id: string, opts: { configured?: boolean; check?: AuthCheck | (() 
     id,
     isConfigured: () => opts.configured ?? true,
     configIssue: () => (opts.configured === false ? `${id.toUpperCase()}_API_KEY is set but empty or whitespace.` : null),
+    credentialShape: () => 'starts with "sk-or-v1-", 73 characters',
     checkAuth: async () => {
       probes++;
       const c = opts.check ?? { state: "ok", detail: null };
@@ -39,6 +40,7 @@ test("readiness: a provider that rejects its key is not ready; the others still 
   assert.deepEqual([...r.ready.keys()], ["openai"]);
   assert.equal(r.statuses[0].state, "auth_failed");
   assert.match(r.statuses[0].detail!, /Missing Authentication header/);
+  assert.match(r.statuses[0].detail!, /Key starts with "sk-or-v1-", 73 characters\./);
   assert.equal(r.statuses[1].state, "ready");
 });
 

@@ -1,4 +1,4 @@
-import { describeIssue, readCredential } from "./credentials";
+import { describeIssue, keyShape, readCredential } from "./credentials";
 import { chatCompletions } from "./openaiCompatible";
 import { probeAuth, type ProviderAdapter, type RunModelRequest } from "./types";
 
@@ -8,6 +8,10 @@ export function openAIAdapter(opts: { apiKey?: string; fetchImpl?: typeof fetch 
   return {
     id: "openai",
     isConfigured: () => cred().key !== null,
+    credentialShape: () => {
+      const k = cred().key;
+      return k ? keyShape(k) : null;
+    },
     configIssue: () => {
       const c = cred();
       return c.issue ? describeIssue("OPENAI_API_KEY", c.issue) : null;

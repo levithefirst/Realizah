@@ -1,4 +1,4 @@
-import { describeIssue, readCredential } from "./credentials";
+import { describeIssue, keyShape, readCredential } from "./credentials";
 import { chatCompletions } from "./openaiCompatible";
 import { probeAuth, type ProviderAdapter, type RunModelRequest } from "./types";
 
@@ -8,6 +8,10 @@ export function openRouterAdapter(opts: { apiKey?: string; appUrl?: string; fetc
   return {
     id: "openrouter",
     isConfigured: () => cred().key !== null,
+    credentialShape: () => {
+      const k = cred().key;
+      return k ? keyShape(k) : null;
+    },
     configIssue: () => {
       const c = cred();
       return c.issue ? describeIssue("OPENROUTER_API_KEY", c.issue) : null;

@@ -36,3 +36,11 @@ export function describeIssue(envVar: string, issue: CredentialIssue): string {
       return `${envVar} looks like a placeholder, not a real key.`;
   }
 }
+
+// A non-secret description of a key for diagnostics: its public format
+// family and length. Never any character beyond the documented prefix.
+const FAMILIES = ["sk-or-v1-", "sk-or-", "sk-proj-", "sk-svcacct-", "sk-ant-", "sk-"];
+export function keyShape(key: string): string {
+  const family = FAMILIES.find((p) => key.startsWith(p));
+  return `${family ? `starts with "${family}"` : "no known key prefix"}, ${key.length} characters`;
+}
