@@ -3,9 +3,9 @@
 // Readiness combines the static credential check with a cheap, cached auth
 // probe and with auth failures observed during real runs.
 //
-// /api/plan never probes (no network on every plan); it only honours what is
-// already known. /api/run and /api/models probe, at most once per TTL per
-// server instance, and concurrent callers share one probe.
+// Callers that pass verify: true probe at most once per TTL per server
+// instance, and concurrent callers share one probe; verify: false only
+// honours what is already known (no network at all).
 import { defaultAdapters } from "./index";
 import type { AuthCheck, ProviderAdapter } from "./types";
 

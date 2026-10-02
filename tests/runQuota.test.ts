@@ -8,6 +8,7 @@ import { refreshRegistry } from "../lib/registry/refresh";
 import { resetProviderHealth } from "../lib/providers/readiness";
 import { clientIp, hashIp, refundToken, takeToken } from "../lib/ratelimit";
 import { POST } from "../app/api/run/route";
+import { planComparison } from "../lib/comparison/service";
 
 const TASK = "Write a product update for our customers. Keep it under 100 words.";
 const words = (n: number) => Array.from({ length: n }, () => "word").join(" ");
@@ -153,4 +154,19 @@ test("over the limit: refused without running, and no refund inflates the allowa
   assert.equal(res.status, 429);
   assert.equal(chatCalls.length, before);
   assert.equal(await used(pg), 2, "the refused attempt is counted, not refunded");
+});
+
+test("plans reflect a rejected key too (cached probe), so plan and run agree", async () => {
+  mode.probe = "auth_failed";
+  const input = { toolInput: "ChatGPT", useCase: "writing", task: TASK, budgetUsd: null, wordMaxOverride: 30 };
+  const { plan } = await planComparison(input);
+  assert.deepEqual(plan.providersConfigured, []);
+  assert.equal(plan.providers[0].state, "auth_failed");
+  assert.equal(plan.executable, false);
+  assert.match(plan.reason!, /No model provider is available/);
+  mode.probe = "ok";
+  resetProviderHealth();
+  const ok = await planComparison(input);
+  assert.equal(ok.plan.outputTokenCeiling, 106, "wordMax=30 shapes the live plan");
+  assert.ok(ok.plan.candidates.every((c) => !c.slug.endsWith(":batch")));
 });

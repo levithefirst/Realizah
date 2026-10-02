@@ -162,9 +162,10 @@ spend or rate-limit use. All execution is server-side; keys never reach the brow
 
 **Provider readiness.** A provider counts as available only with a usable key (`lib/providers/credentials.ts`
 rejects empty, whitespace, placeholder and malformed values, and strips pasted quotes or a `Bearer ` prefix)
-that the provider has not rejected. `/api/run` and `/api/models` verify keys with a non-billable probe
-(OpenRouter `GET /api/v1/key`, OpenAI `GET /v1/models`), cached per server instance (10 min when valid, 5 min
-when rejected); `/api/plan` never probes and only honours known failures. Auth failures seen during real runs
+that the provider has not rejected. `/api/plan`, `/api/run` and `/api/models` verify keys with a non-billable
+probe (OpenRouter `GET /api/v1/key`, OpenAI `GET /v1/models`), cached per server instance and shared by
+concurrent requests (10 min when valid, 5 min when rejected, 1 min when inconclusive), so plans don't probe
+on every request. Auth failures seen during real runs
 mark the provider unavailable the same way. If no provider is available, `/api/run` returns 503 before using a
 free comparison. Error messages and logs are redacted of anything key-like.
 

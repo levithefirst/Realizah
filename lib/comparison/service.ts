@@ -160,8 +160,9 @@ const toDTO = (c: Candidate): CandidateDTO => ({
 });
 
 // adapters: the providers allowed to execute. Defaults to the configured ones
-// minus any known to be rejecting their key (no network call); /api/run
-// passes the set it has just verified.
+// that pass the cached auth probe (at most one probe per provider per TTL per
+// instance, shared by concurrent requests); /api/run passes the set it has
+// just verified.
 export async function planComparison(input: ComparisonInput, opts: { adapters?: Map<string, ProviderAdapter> } = {}) {
   const products = await listProducts();
   const product = matchProduct(input.toolInput, products);
@@ -169,7 +170,7 @@ export async function planComparison(input: ComparisonInput, opts: { adapters?: 
     understandTask({ task: input.task, useCase: input.useCase, productCapability: product?.capability ?? null }),
     input.wordMaxOverride
   );
-  const readiness = opts.adapters ? null : await providerReadiness({ verify: false });
+  const readiness = opts.adapters ? null : await providerReadiness({ verify: true });
   const adapters = opts.adapters ?? readiness!.ready;
   const limits = executionLimits();
   const productDTO = { name: product?.name ?? input.toolInput.trim(), slug: product?.slug ?? null, capability: product?.capability ?? null };
